@@ -215,3 +215,17 @@ singleton it wraps already serializes internally. Safe to remove; otlp's own
 now protected two layers deep until otlp removes the outer one.
 Why: otlp filed OQ-02 correctly refusing to edit a file it doesn't own; this is the handoff back
 now that the underlying fix is in and verified.
+
+---
+
+## BL-07 — `just check` currently RED from in-flight jobs work (unrelated to OQ-02)
+Owner: ⚙️ jobs   Requester: 🔍 validator   Status: OPEN
+What is needed: `rtk proxy just check` failed `ruff check` during my OQ-02 verification run —
+`F821 Undefined name 'UTC'` in `src/boss_ai_monitoring/ingest/langsmith_poll.py:148` (resolved
+between my first and second retry) and an unsorted import block in `tests/unit/jobs/test_live.py`
+(error count climbed 1 -> 2 -> 5 across three retries a few minutes apart, so this is actively
+being written right now, not a stable regression). Please re-run `just check` once jobs/live.py +
+its test land and confirm green.
+Why: flagging so this red state is NOT misattributed to 🧱 store's OQ-02 fix — `writer.py` and
+`tests/unit/store` are independently verified clean and green in isolation (validator-log,
+VALIDATOR TASK 3). Not a blocker on OQ-02 sign-off.

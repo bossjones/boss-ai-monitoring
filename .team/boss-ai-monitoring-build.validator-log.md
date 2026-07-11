@@ -268,3 +268,152 @@ with real DB-query evidence (not response-code inference), request_id populated,
 and port-ownership boundary both intact. Files restored byte-identical, no residue.
 
 TASK-DONE: validator | otlp Phase 3 independently verified — 172/172 (now 173 w/ store's concurrent addition) green, red-first confirmed (12/24 fail on gutted handler), all 7 spec edge cases proven by direct DB query incl. gzip/oversized/malformed-recovery/unknown-type-raw/concurrent-safety/idempotency/request_id, router contract + port-ownership boundary intact | otlp-verified-Y red-first-Y
+
+---
+
+## VALIDATOR TASK 3 — 🧱 store's OQ-02 concurrency fix independent verification
+
+Claimed: `TASK-DONE: store | flush() now serializes the whole DB round-trip (not just the buffer
+swap) under one lock | tests+1 red-first-Y`, filed BL-06, committed as `b4a47a2`.
+
+### 1. `rtk proxy just check` — raw tail
+
+First attempt was RED, but from an unrelated in-flight pane, not store:
+
+```
+$ rtk proxy just check
+F821 Undefined name `UTC`
+   --> src/boss_ai_monitoring/ingest/langsmith_poll.py:148:31
+I001 [*] Import block is un-sorted or un-formatted
+  --> tests/unit/jobs/test_live.py:9:1
+Found 2 errors.
+error: Recipe `lint` failed on line 11 with exit code 1
+```
+
+Retried — the `UTC` error resolved itself (⚙️ jobs/📜 langsmith actively saving) but the import
+error remained, and a third retry showed the error count climb to 5 in `tests/unit/jobs/test_live.py`
+— confirms this is a pane mid-write right now, not a stable regression. None of the failing paths
+(`ingest/langsmith_poll.py`, `jobs/live.py`, `tests/unit/jobs/test_live.py`) touch `store/` or
+OQ-02. Filed **BL-07** naming ⚙️ jobs as owner so this isn't misattributed to store.
+
+Scoped to store directly instead:
+
+```
+$ rtk proxy uv run pytest tests/unit/store -q
+...............................                                          [100%]
+31 passed in 1.07s
+```
+
+31 passed (30 + store's new OQ-02 regression test) — matches claimed `tests+1`.
+
+### 2. RED-FIRST PROOF — the core of this verification
+
+Read `store/writer.py`; confirmed the only change in commit `b4a47a2` to this file is moving the
+`_flush_batch(batch)` call (and the `if not batch: return 0` guard) INSIDE the `with self._lock:`
+block that previously only covered the buffer swap (diff below, item 3).
+
+Reverted ONLY that locking change — moved `_flush_batch` back OUTSIDE `with self._lock:`,
+everything else (including the new test) left intact. Ran
+`test_concurrent_flush_through_singleton_has_no_exceptions_or_data_loss` **5 times** against the
+reverted (racy) code:
+
+```
+$ rtk proxy uv run pytest tests/unit/store/test_writer.py -q -k concurrent_flush   (x5, all failed identically)
+AssertionError: concurrent flush raised: [
+  TransactionException('TransactionContext Error: cannot start a transaction within a transaction'),
+  TransactionException('TransactionContext Error: Current transaction is aborted (please ROLLBACK)'),
+  ... (8 exceptions total per run)
+]
+1 failed, 13 deselected in ~0.1-0.5s
+```
+
+5/5 runs failed with exactly the `TransactionException` store reported reproducing. This is a
+real, reliably-reproducible red — not a flaky test that happened to pass once.
+
+Restored `writer.py` from a pre-mutation scratchpad backup: `diff` against backup = **empty**.
+`git status --short src/boss_ai_monitoring/store/writer.py` → **no output (clean)**. Re-ran the
+test 3x against the restored fix — green every time:
+
+```
+$ rtk proxy uv run pytest tests/unit/store/test_writer.py -q -k concurrent_flush   (x3)
+1 passed, 13 deselected in 0.25-0.27s
+```
+
+### 3. Fix serializes the TRANSACTION, not just the buffer swap
+
+Read `flush()` directly (`src/boss_ai_monitoring/store/writer.py:98-113`):
+
+```python
+def flush(self) -> int:
+    with self._lock:
+        batch = self._buffer
+        self._buffer = []
+        self._last_flush = time.monotonic()
+        if not batch:
+            return 0
+        return self._flush_batch(batch)
+```
+
+`_flush_batch` (called from inside the lock) is what runs `BEGIN TRANSACTION` /
+`DELETE`/`INSERT`/`COMMIT`/`ROLLBACK` on `self._conn`. **Confirmed: the whole DB round-trip is
+inside `self._lock`, not merely the buffer swap.** This is the exact fix needed — the pre-fix
+version released the lock before calling `_flush_batch`, letting two threads both pass the swap
+and then race `BEGIN TRANSACTION` on the shared connection.
+
+`git show b4a47a2 -- src/boss_ai_monitoring/store/writer.py` confirms this is the ONLY functional
+change in that commit to this file (plus a docstring) — moving `_flush_batch(batch)` and the
+early-return guard from after the `with` block to inside it.
+
+### 4. Idempotency + no loss/no duplication under concurrency — proven by direct DB query
+
+Wrote an independent probe (scratchpad, not store's test): 10 threads, 30 events each, with
+threads 0 and 1 deliberately writing the SAME `event_id`s (`shared-dup-0..29`) to force
+cross-thread idempotency collisions, not just same-thread replay. All threads call
+`writer.write()` + `writer.flush()` in a loop against the real (fixed) `EventWriter`.
+
+```
+$ rtk proxy uv run python <scratchpad>/validator_oq02_concurrency_idempotency.py
+errors: []
+total_rows: 270
+distinct_event_ids: 270
+expected_unique_ids: 270
+no_loss_no_dup: True
+reflush_added_rows: 0 (expect 0)
+before_reflush: 270 after_reflush: 270 delta: 0
+```
+
+- **No errors** across 10 concurrent threads (300 write+flush calls total).
+- **270 total rows == 270 distinct event_ids == 270 expected unique ids** (8 threads × 30
+  thread-local ids + 30 cross-thread-shared ids) — zero rows lost, zero rows duplicated, even
+  with deliberate cross-thread `event_id` collisions.
+- A subsequent explicit re-flush of an already-written id (`shared-dup-0`) added **0 new rows**
+  (`before_reflush == after_reflush == 270`) — confirms idempotency holds after the concurrency
+  stress, by direct query, not inference.
+
+### 5. Ownership sanity — store did not touch otlp.py
+
+```
+$ git show b4a47a2 --stat
+ src/boss_ai_monitoring/ingest/otlp.py             | 317 +++++++++++++++++
+ src/boss_ai_monitoring/store/writer.py            |  15 +-
+ ...
+```
+
+`b4a47a2` is a single consolidated INGEST-FANOUT commit (lead-authored, bundles otlp/jsonl/
+langsmith Phase 3-5 AND store's OQ-02 fix together) — otlp.py shows as +317 insertions because
+this is the commit that FIRST adds the previously-untracked file to git, not an edit to existing
+tracked content. To check what actually matters — did store change otlp.py's *content* — I
+diffed the current file against my own scratchpad backup taken during VALIDATOR TASK 2 (BEFORE
+this commit existed): **empty diff, byte-identical.** Store did not touch otlp.py's content at
+all; only `store/writer.py` (15 lines) was functionally changed. No ownership violation.
+
+### VERDICT
+
+All five checks pass. Store's OQ-02 fix claim is verified independently, not taken on word: the
+red-first claim is proven reproducibly (5/5 runs fail on the reverted lock, exact reported
+exception), the fix genuinely serializes the whole transaction (read directly, confirmed by
+diff), idempotency and no-loss/no-dup hold under real concurrent + cross-thread-collision stress
+(direct DB query), and store did not cross into otlp's file. One unrelated finding flagged as
+BL-07 (⚙️ jobs in-flight lint state) so it isn't confused with this verification.
+
+TASK-DONE: validator | OQ-02 fix independently verified — lock now covers the whole DB transaction (read + diff-confirmed), red-first reproduced 5/5 on the pre-fix code with the exact reported TransactionException, idempotency+no-loss/no-dup proven under concurrent cross-thread collisions via direct DB query, otlp.py content byte-identical (no ownership violation); unrelated jobs-pane lint redness flagged separately as BL-07 | oq02-verified-Y red-first-Y

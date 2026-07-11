@@ -152,4 +152,59 @@ step (otlp.md Acceptance: `just dev` + one real Claude Code prompt, then
 double as the real-payload diff against these fixtures once the router is mounted (BL-02).
 
 ---
+
+## OQ-04 — `connect_read_only()` cannot coexist with a live `get_writer()` in the same process
+Status: NEEDS-STORE (this is load-bearing — it blocks jobs' and web's live read paths, not a
+nice-to-have)
+Spec: BL-01 `store/writer.py` — `connect_read_only(db_path) -> duckdb.DuckDBPyConnection`:
+"Everyone READING (web, jobs, the marimo notebook, tests) uses THIS — a read-only connection, so
+it never fights the single writer." BL-02: `bam serve` runs ONE FastAPI app on both binds in ONE
+asyncio loop/process; jobs' scheduler is a background asyncio task in that same process/loop.
+What I tried: reproduced directly with raw `duckdb` (no jobs/store code involved, isolating this
+from my own logic):
+```python
+import duckdb
+w = duckdb.connect(path)                    # a live, open, non-read-only connection
+w.execute("CREATE TABLE t(x INT)")
+duckdb.connect(path, read_only=True)         # <-- raises, even though w has no open transaction
+# _duckdb.ConnectionException: Connection Error: Can't open a connection to same database
+# file with a different configuration than existing connections
+```
+Also reproduced with the real functions: `get_writer(settings)` (leaves its `EventWriter._conn`
+open, as a process-wide singleton is supposed to) followed by `connect_read_only(settings.store
+.db_path)` in the same process raises identically — every one of my `tests/unit/jobs/test_live.py`
+tests hit this until I rewrote them to use short-lived `EventWriter(db_path)` context managers
+(fully closed before the read) instead of the `get_writer()` singleton, which sidesteps it in
+*tests* but does not reflect how `bam serve` actually runs.
+Why it is stuck: `get_writer()`'s whole purpose is a connection that stays open for the app's
+lifetime (never closed between operations) — the instant any OTLP/JSONL/LangSmith event has
+been ingested and the writer singleton is live, EVERY subsequent `connect_read_only()` call
+anywhere in that same process (web routes, jobs' scheduler runs, the marimo notebook if run
+in-process) will raise this `ConnectionException`. This is `duckdb`'s in-process connection-cache
+behavior, not a bug in anyone's code — but the documented `connect_read_only()` contract assumes
+it's safe to call concurrently with a live writer, and duckdb 1.5.4 does not allow that.
+My best guess: two known duckdb-compatible fixes, both store's call since both touch
+`store/writer.py`:
+  1. Have readers pull a `.cursor()` off the SAME live connection instead of opening an
+     independent `duckdb.connect(..., read_only=True)` — duckdb cursors on one connection object
+     support concurrent queries via MVCC without the config-mismatch check. This likely means
+     `connect_read_only(db_path)` needs to become writer-aware (e.g. reuse `get_writer`'s
+     connection via `.cursor()` when a writer for that path is already live in-process, and fall
+     back to a fresh `read_only=True` connect only when no writer is live — e.g. in tests, the
+     marimo notebook run standalone, or store's own golden-fixture tests).
+  2. Alternatively just document/enforce single-process discipline differently (a wholly separate
+     DuckDB `ATTACH ... (READ_ONLY)` inside an in-memory root connection) — more invasive, likely
+     not worth it if (1) works.
+Cost of guessing wrong: HIGH — if unresolved, `bam serve` will 500/crash the first time a web
+route or a jobs run tries to read while the OTLP writer has ever been touched, which is every
+real run past the first ingested event. I did not attempt a fix myself (`store/writer.py` is not
+mine); my own `jobs/live.py` functions (`fetch_events`, `run_correction_scan`, `run_drift_check`,
+`run_error_classification`, `persist_job_status`, `read_job_status`) are otherwise correct and
+fully green against a closed-writer-then-read pattern — they need no changes once
+`connect_read_only()` itself is fixed; only my test setup had to route around this to prove the
+job logic. `build_scheduler(settings)`-style single-call wiring (writer + live callables +
+scheduler) is deliberately NOT shipped this wave because I cannot honestly claim it works
+end-to-end until this is resolved — see BL-07 for the composable pieces I did ship.
+
+---
 (end of current questions)
