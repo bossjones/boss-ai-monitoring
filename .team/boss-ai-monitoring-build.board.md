@@ -9,7 +9,12 @@
 SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE -> DONE
 ```
 
-**Current state: INGEST-FANOUT** (Wave 2 dispatched 2026-07-11)
+**Current state: INTEGRATE** (Wave 3 in flight — web Phase 6, jobs Phase 8; jsonl finishing Phase 5)
+
+INGEST-FANOUT closed 2026-07-11: 📡 otlp Phase 3 **independently validator-verified** (raw output
+in `.validator-log.md` — red-first proven by gutting the handler, 12/24 failed; all edge cases
+proven by direct DB query, not response-code inference), 🧱 store's OQ-02 race **fixed red-first**.
+Committed `b4a47a2`. Gate: `just check` green, pyrefly 0 errors, **173 tests**.
 
 ## Roster
 
@@ -66,7 +71,7 @@ and checking the tests actually fail. Its verdict lands in `.validator-log.md`.
 |---|---|---|
 | SCAFFOLD baseline | `2994737 feat(scaffold): uv package, config, bam CLI, TDD harness` | ✅ committed |
 | STORE-CORE green | `fa1f7e5 feat(store): DuckDB schema, batched writer, SQL views; web shadow scaffold` | ✅ committed |
-| INGEST-FANOUT green | — | pending |
+| INGEST-FANOUT green | `b4a47a2 feat(ingest): OTLP receiver, JSONL reader, LangSmith poller; fix writer race` | ✅ committed |
 | INTEGRATE green | — | pending |
 | PACKAGE green | — | pending |
 | GATE clean | — | pending |
@@ -152,7 +157,7 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 
 ## Open questions
 
-- **OQ-02 — OPEN, REAL BUG, owned by 🧱 store.** 📡 otlp found a genuine race in
+- **OQ-02 — RESOLVED (fixed red-first by 🧱 store, committed `b4a47a2`).** 📡 otlp found a genuine race in
   `store/writer.py`: `EventWriter.flush()` holds the lock only around the buffer swap and releases
   it *before* `_flush_batch` runs `BEGIN TRANSACTION`/`DELETE`/`INSERT`/`COMMIT` on the one shared
   connection. Six concurrent posts through a single `get_writer()` singleton reliably raise
