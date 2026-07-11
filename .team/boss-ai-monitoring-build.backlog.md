@@ -229,3 +229,57 @@ its test land and confirm green.
 Why: flagging so this red state is NOT misattributed to 🧱 store's OQ-02 fix — `writer.py` and
 `tests/unit/store` are independently verified clean and green in isolation (validator-log,
 VALIDATOR TASK 3). Not a blocker on OQ-02 sign-off.
+
+STATUS UPDATE (⚙️ jobs, Wave 3): RESOLVED — `jobs/live.py` + `tests/unit/jobs/test_live.py` are
+landed and green (`uvx ruff check`, `ruff format --check`, `pyrefly check`, `codespell` all clean
+for `src/boss_ai_monitoring/jobs/**` + `tests/unit/jobs/**`; 50/50 jobs tests pass). Confirmed
+these were the only files red at the time — see BL-08 below for what shipped and OQ-04 for a
+genuine cross-cutting `duckdb` limitation found along the way.
+
+---
+
+## BL-08 — RESOLVED: provenance-footer contract finalized (supersedes BL-05's open proposal)
+Owner: 🖥 web (already consuming this)   Requester: ⚙️ jobs   Status: DONE — verified end-to-end
+What shipped: 🖥 web's `web/queries.py::get_provenance_footer` had already committed to reading
+`events` rows with `event_type = 'job_run'` (payload carrying `name`/`status`) while BL-05 was
+still open — ⚙️ jobs adopted that exact shape rather than the `ingest_cursors` cursor-slot
+proposal floated in BL-05, to avoid a silent mismatch. `jobs/live.py::persist_job_status(writer,
+result)` now writes ONE NEW `events` row per job run (never updates in place — "events over
+metrics", shared.md) via the `EventWriter` singleton (G5):
+```
+event_type = "job_run", source = "jobs"
+payload = {"name": <job>, "status": "ok"|"error", "started_at", "finished_at", "error"}
+         + "alert_count": <int>  # drift_check runs only — see below for the drift badge
+agent_name/skill_name/model/cost_usd = NULL  (excluded from v_cost_events; see caveat below)
+```
+Verified live end-to-end (`EventWriter` write -> `connect_read_only` -> `get_provenance_footer`)
+— `web/queries.py`'s existing `QUALIFY row_number() OVER (PARTITION BY
+json_extract_string(payload,'$.name') ORDER BY ts DESC) = 1` query returns the correct latest
+row per job unmodified. No web-side change needed.
+
+**Drift badge** (`ProvenanceFooter.drift_status`, currently hardcoded `"unknown"` per web's own
+comment — "⚙️ jobs owns the drift-check query"): the `drift_check` job's persisted row carries an
+extra `alert_count` payload key (`int`, count of `DriftAlert`s from that run). Proposed query for
+web to compute `drift_status`:
+```sql
+SELECT json_extract_string(payload, '$.status') AS status,
+       CAST(json_extract(payload, '$.alert_count') AS INTEGER) AS alert_count
+FROM events
+WHERE event_type = 'job_run' AND json_extract_string(payload, '$.name') = 'drift_check'
+QUALIFY row_number() OVER (ORDER BY ts DESC) = 1
+```
+`drift_status` := `"unknown"` if no row; `"alert"` if `alert_count > 0`; `"error"` if
+`status = 'error'`; else `"ok"`.
+
+**Caveat for 🧱 store**: `job_run` rows have no `event_type` filter to dodge in
+`v_attribution`'s `attributed_stats` CTE (`store/views.sql`) — they land in that view's
+`(agent_name, skill_name, model) = (NULL, NULL, NULL)` bucket alongside any other unattributed
+event, inflating that bucket's `event_count`/`avg_duration_ms` (NOT its `cost_usd`, which stays
+0 — `job_run` rows have `cost_usd = NULL` so `v_cost_events` already excludes them). Low severity,
+not blocking; a one-line `WHERE event_type NOT IN ('job_run')` (or an explicit domain-event
+allowlist) in that CTE would fully separate scheduler bookkeeping from real attribution numbers
+whenever store has a spare cycle.
+Why: BL-05 asked "what shape should jobs persist" and left it to store/web; web moved first and
+built a concrete, already-working query — this entry records the shape jobs actually shipped
+against it, closes BL-05's open question, and hands web the one piece (`alert_count`) it doesn't
+have yet.

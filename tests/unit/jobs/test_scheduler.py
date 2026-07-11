@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from boss_ai_monitoring.config import JobsSettings
-from boss_ai_monitoring.jobs.scheduler import JobCallable, JobDefinition, JobScheduler
+from boss_ai_monitoring.jobs.scheduler import JobCallable, JobDefinition, JobRunResult, JobScheduler
 
 
 def _clock_sequence(*timestamps: datetime):
@@ -153,6 +153,71 @@ async def test_run_forever_sleeps_interval_plus_jitter_between_passes() -> None:
 
     # 3 passes -> 2 sleeps between them (no trailing sleep after the last pass)
     assert sleep_calls == [65.0, 65.0]
+
+
+async def test_persist_hook_is_called_with_the_result_after_an_ok_run() -> None:
+    persisted = []
+
+    scheduler = JobScheduler(
+        [JobDefinition(name="corrections", enabled=True, func=lambda: "done")],
+        interval_s=60,
+        persist=persisted.append,
+    )
+
+    results = await scheduler.run_once()
+
+    assert persisted == results
+    assert persisted[0].status == "ok"
+
+
+async def test_persist_hook_is_called_with_the_result_after_an_error_run() -> None:
+    persisted = []
+
+    def _boom() -> None:
+        raise RuntimeError("kaboom")
+
+    scheduler = JobScheduler(
+        [JobDefinition(name="broken", enabled=True, func=_boom)],
+        interval_s=60,
+        persist=persisted.append,
+    )
+
+    await scheduler.run_once()
+
+    assert len(persisted) == 1
+    assert persisted[0].status == "error"
+
+
+async def test_persist_hook_is_not_called_for_a_disabled_job() -> None:
+    persisted = []
+
+    scheduler = JobScheduler(
+        [JobDefinition(name="drift", enabled=False, func=lambda: None)],
+        interval_s=60,
+        persist=persisted.append,
+    )
+
+    await scheduler.run_once()
+
+    assert persisted == []
+
+
+async def test_persist_hook_failure_does_not_crash_the_scheduler_or_lose_last_status() -> None:
+    def _boom_on_persist(result: JobRunResult) -> None:
+        raise RuntimeError("persist boom")
+
+    scheduler = JobScheduler(
+        [JobDefinition(name="corrections", enabled=True, func=lambda: "done")],
+        interval_s=60,
+        persist=_boom_on_persist,
+    )
+
+    results = await scheduler.run_once()
+
+    assert results[0].status == "ok"
+    status = scheduler.last_status("corrections")
+    assert status is not None
+    assert status.status == "ok"
 
 
 async def test_run_forever_runs_zero_jitter_when_jitter_s_is_zero() -> None:

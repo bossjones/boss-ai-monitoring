@@ -13,6 +13,7 @@ Wave 1: the shape only. Job callables are injected — Wave 3 wires real callabl
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class JobScheduler:
         clock: Callable[[], datetime] = _utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rand: Callable[[float, float], float] = random.uniform,
+        persist: Callable[[JobRunResult], None] | None = None,
     ) -> None:
         self._jobs = list(jobs)
         self._interval_s = interval_s
@@ -74,6 +76,7 @@ class JobScheduler:
         self._clock = clock
         self._sleep = sleep
         self._rand = rand
+        self._persist = persist
         self._last_status: dict[str, JobRunResult] = {}
 
     @classmethod
@@ -85,6 +88,7 @@ class JobScheduler:
         clock: Callable[[], datetime] = _utc_now,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rand: Callable[[float, float], float] = random.uniform,
+        persist: Callable[[JobRunResult], None] | None = None,
     ) -> JobScheduler:
         """Build `JobDefinition`s from a name->callable mapping, gated by settings enable flags."""
         jobs = [
@@ -102,6 +106,7 @@ class JobScheduler:
             clock=clock,
             sleep=sleep,
             rand=rand,
+            persist=persist,
         )
 
     async def run_once(self) -> list[JobRunResult]:
@@ -136,6 +141,9 @@ class JobScheduler:
                 )
             self._last_status[job.name] = result
             results.append(result)
+            if self._persist is not None:
+                with contextlib.suppress(Exception):  # a broken persist sink must not lose the run
+                    self._persist(result)
         return results
 
     def last_status(self, name: str) -> JobRunResult | None:
