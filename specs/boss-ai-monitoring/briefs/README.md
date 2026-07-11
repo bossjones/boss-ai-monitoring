@@ -19,7 +19,7 @@ over verbatim. A 61KB HTML read costs every worker ~20k tokens per lookup; a sco
 3. **Where a brief deviates from the HTML's literal text, the deviation is deliberate and
    flagged** with a `> RUN NOTE:` block (test layout, no-push, browser order — all decided in
    [`prompts/boss-ai-monitoring-build-team.md`](../../../prompts/boss-ai-monitoring-build-team.md)
-   rev 2 and its GROUND TRUTHS).
+   rev 3+ and its GROUND TRUTHS).
 
 ## Index
 

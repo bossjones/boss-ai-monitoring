@@ -58,6 +58,10 @@ POSTs an OTLP fixture, asserts the event appears via SSE within 5s. Edge cases t
 `# otlp-mount` block under a lead-issued LOAN TICKET. You own the mount call; otlp owns the
 router internals.
 
+Serving model (decided rev 4 — you do NOT wire ports): `web/app.py` builds ONE app object; the
+lead's `bam serve` serves it on two uvicorn binds (:8000 dashboard, :4318 OTLP). Don't add port
+logic to the app module.
+
 ## Phase 7: Agent Frontend-Improvement Loop
 
 Deliverable = `docs/AGENT_LOOP.md` + one demonstrated iteration with before/after screenshots

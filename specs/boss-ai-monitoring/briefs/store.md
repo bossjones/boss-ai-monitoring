@@ -15,9 +15,10 @@ migrations; SQL views turn raw events into every metric the dashboard shows.
 
 - RED: tests for the `events` table shape — columns, exactly:
   `event_id` (pk), `ts`, `source` (otlp|jsonl|langsmith), `event_type`, `session_id`,
-  `prompt_id`, `model`, `git_sha`, `agent_name`, `skill_name`, `tool_name`, `cost_usd`,
-  `duration_ms`, `tokens_input`, `tokens_output`, `tokens_cache_read`, `tokens_cache_creation`,
-  `success`, `cwd`, `payload` (JSON).
+  `prompt_id`, `request_id` (nullable — the API request identifier; keys the JSONL↔OTel
+  dedupe/cost exclusion), `model`, `git_sha`, `agent_name`, `skill_name`, `tool_name`,
+  `cost_usd`, `duration_ms`, `tokens_input`, `tokens_output`, `tokens_cache_read`,
+  `tokens_cache_creation`, `success`, `cwd`, `payload` (JSON).
 - Plus `ingest_cursors` table: `source`, `key`, `cursor`, `updated_at`.
 - GREEN: `store/schema.py` creates tables idempotently (`CREATE TABLE IF NOT EXISTS`).
 
@@ -42,6 +43,12 @@ migrations; SQL views turn raw events into every metric the dashboard shows.
   - `v_five_metrics` — task completion rate; tool selection accuracy via `tool_result.success`;
     autonomy score via `tool_decision.source`; recovery rate via error→retry patterns; cost per
     successful task
+- **Cost-exclusion rule (you own it — it lives in `views.sql`):** every cost-bearing view
+  (`v_costs_daily`, and the cost fields of `v_tasks`, `v_attribution`, `v_five_metrics`)
+  EXCLUDES `source='jsonl'` cost rows whenever an OTel-derived cost exists for the same
+  `session_id + request_id` — JSONL costs are flagged estimates, OTel cost is authoritative (G6).
+  Golden-fixture test: a fixture set containing the same request via both sources must count the
+  cost exactly once.
 - GREEN: `store/views.sql` applied at startup.
 
 ## Testing strategy

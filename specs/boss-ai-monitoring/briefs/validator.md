@@ -27,12 +27,16 @@ worker stalls.
 3. **OTLP round-trip**: `curl -sf -X POST localhost:4318/v1/logs -d
    @tests/fixtures/otlp/api_request.json -H 'Content-Type: application/json'` then reload `/` —
    fixture event visible.
-4. **Three-source count**: `duckdb $BAM_DB_PATH "SELECT source, count(*) FROM events GROUP BY 1"`
-   — `otlp`, `jsonl`, and `langsmith` all > 0.
+4. **Three-source count**: `duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM
+   events GROUP BY 1"` — `otlp`, `jsonl`, and `langsmith` all > 0. ALWAYS the resolved-path form:
+   a bare `$BAM_DB_PATH` is unset in your shell and silently opens an empty in-memory DB, making
+   this check pass/fail meaninglessly.
 5. **LangSmith read-back cross-check**: `langsmith run list --project "$LANGSMITH_PROJECT"
-   --limit 10` pasted next to `duckdb $BAM_DB_PATH "SELECT count(*) FROM events WHERE
-   source='langsmith'"` — LangSmith's runs and our ingested rows must be consistent (unmatched
-   runs allowed only in the visible LangSmith-only bucket).
+   --limit 10` pasted next to `duckdb "$(uv run bam config db-path)" "SELECT count(*) FROM events
+   WHERE source='langsmith'"` — LangSmith's runs and our ingested rows must be consistent
+   (unmatched runs allowed only in the visible LangSmith-only bucket). PREFLIGHT already asserted
+   `$CC_LANGSMITH_PROJECT` (what the poller ingests) equals `$LANGSMITH_PROJECT` (what you
+   query), so this comparison is apples-to-apples.
 6. **Docker round-trip**: `docker compose up --build -d && curl -sf localhost:8000/ && curl -sf
    -X POST localhost:4318/v1/logs -H 'Content-Type: application/json' -d
    @tests/fixtures/otlp/api_request.json` — then `docker compose down`.
@@ -46,15 +50,17 @@ worker stalls.
 
 ## Live-telemetry generation recipe (feeds checks 3–5)
 
-With the app running, launch ONE headless session:
+With the app running, launch ONE headless session — this exact hook-safe inline command (do NOT
+try to source the env sample file: any Bash command containing its name is hook-blocked):
 
 ```
+CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp \
+OTEL_EXPORTER_OTLP_PROTOCOL=http/json OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 claude -p "say hi"
 ```
 
-with `CLAUDE_CODE_ENABLE_TELEMETRY=1` and the `OTEL_*` vars from `.env.sample` pointed at
-`localhost:4318`. One command covers all three sources: it emits real OTLP events AND writes a
-real `~/.claude/projects` JSONL transcript; the LangSmith tracing plugin (`TRACE_TO_LANGSMITH`,
+One command covers all three sources: it emits real OTLP events AND writes a real
+`~/.claude/projects` JSONL transcript; the LangSmith tracing plugin (`TRACE_TO_LANGSMITH`,
 ambient via direnv) covers the third source on the poller's next cycle (default 60s — wait for
 it, then check). Also verify on the dashboard: live events on `/live` within seconds; the
 session page shows a per-task timeline with cost.

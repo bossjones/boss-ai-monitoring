@@ -43,9 +43,10 @@ Design principles from the spec's Solution section:
 ## The canonical event envelope (everyone writes/reads this)
 
 `events` table columns: `event_id` (pk), `ts`, `source` (otlp|jsonl|langsmith), `event_type`,
-`session_id`, `prompt_id`, `model`, `git_sha`, `agent_name`, `skill_name`, `tool_name`,
-`cost_usd`, `duration_ms`, `tokens_input`, `tokens_output`, `tokens_cache_read`,
-`tokens_cache_creation`, `success`, `cwd`, `payload` (JSON).
+`session_id`, `prompt_id`, `request_id` (nullable — the API request identifier: OTel attribute
+on `api_request` events / JSONL `requestId`; keys the JSONL↔OTel dedupe), `model`, `git_sha`,
+`agent_name`, `skill_name`, `tool_name`, `cost_usd`, `duration_ms`, `tokens_input`,
+`tokens_output`, `tokens_cache_read`, `tokens_cache_creation`, `success`, `cwd`, `payload` (JSON).
 
 `ingest_cursors` table: `source`, `key`, `cursor`, `updated_at`.
 
@@ -66,6 +67,12 @@ event types need no migrations. All writes go through the single batched writer 
 - htmx vendored as one static file — no npm, no build step.
 - v1 quality scoring is deterministic/heuristic — no LLM-judge.
 - Commit locally at phase boundaries; **never push**; `just check` is the definition of done.
+- Exclusive file ownership, ONE exception: `.team/*.backlog.md` and `.team/*.open-questions.md`
+  are shared APPEND-ONLY (any pane appends an entry; only the lead edits/triages existing ones).
+- Serving model: ONE FastAPI app (otlp router mounted into `web/app.py`), TWO uvicorn binds —
+  `bam serve` (lead's `cli.py`) serves the same app on :8000 and :4318.
+- The resolved DuckDB path comes from `uv run bam config db-path` — never rely on a bare
+  `$BAM_DB_PATH` in shell commands (it's unset in pane shells and silently opens an empty DB).
 
 > RUN NOTE: test layout is `tests/unit/**`, `tests/integration/**`, `tests/e2e/**` (prompt G13),
 > not the spec's literal `tests/store` / `tests/ingest/...` paths. Where this brief set quotes an

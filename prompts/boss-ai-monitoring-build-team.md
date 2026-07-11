@@ -1,6 +1,6 @@
 # boss-cmux — boss-ai-monitoring BUILD run
 
-> **STATUS: CURRENT** (rev 3, 2026-07-11). First prompt in this repo's lineage — there is no prior
+> **STATUS: CURRENT** (rev 4, 2026-07-11). First prompt in this repo's lineage — there is no prior
 > research/verify run to supersede. The spec ([`specs/boss-ai-monitoring/boss-ai-monitoring.html`](../specs/boss-ai-monitoring/boss-ai-monitoring.html))
 > is already detailed, decided (every open question resolved via `AskUserQuestion` at authoring
 > time), and phase-ordered — so this run goes straight to **build**, TDD red-first, implementing
@@ -20,6 +20,17 @@
 > canonical human-facing spec; agents read `shared.md` + their role brief instead (schemas, edge
 > cases, and acceptance criteria carried verbatim; deliberate run deviations flagged as
 > `RUN NOTE:`). Kickoff messages and BINDING LESSON 7 updated accordingly.
+>
+> **Rev 4 changes** (same day, post fresh-eyes audit — 3 blockers + 8 should-fixes):
+> `request_id` added to the events schema + both ingest extraction lists (the dedupe key
+> previously had no column and no extractor); dual-port serving decided — one FastAPI app, two
+> uvicorn binds owned by lead's `cli.py` (`bam serve`); lead now scaffolds ALL package/tests
+> skeletons (`__init__.py` set, `tests/conftest.py`) and owns `uv.lock`; marimo dep add moved to
+> Wave 0; live-telemetry recipe made hook-safe (inline env vars — the sample-file wording was
+> itself hook-blocked, confirmed empirically); `bam config db-path` added so GATE duckdb checks
+> use the resolved path instead of a bare `$BAM_DB_PATH`; PREFLIGHT asserts the two LangSmith
+> project vars match; GATE now defers to the 8-point checklist in `briefs/validator.md`;
+> `.team/` append-only shared files documented as the explicit ownership exception.
 
 ## Why this run is shaped the way it is
 
@@ -151,6 +162,10 @@ seconds, found at GATE it costs the whole run:
     docker info >/dev/null  # daemon RUNNING, not merely installed — start Docker Desktop if not
     direnv exec . sh -c 'test -n "$LANGSMITH_PROJECT"' && echo "langsmith env OK"
                             # presence check ONLY — never echo the values themselves
+    direnv exec . sh -c '[ "$CC_LANGSMITH_PROJECT" = "$LANGSMITH_PROJECT" ]' && echo "project vars agree"
+                            # the poller ingests $CC_LANGSMITH_PROJECT; the read-back checks
+                            # $LANGSMITH_PROJECT — GATE compares them, so they MUST name the
+                            # same project (equality check only, no printing)
 
 The last check confirms direnv loads the repo's envrc file (LangSmith auth is AMBIENT: every pane's
 shell gets TRACE_TO_LANGSMITH, CC_LANGSMITH_API_KEY, CC_LANGSMITH_PROJECT, LANGSMITH_API_KEY,
@@ -206,11 +221,14 @@ jsonl->jsonl-langsmith.md, web->web.md, jobs->jobs.md, validator->validator.md.
 ROLES AND EXCLUSIVE FILE OWNERSHIP — no file has two writers, ever
 ════════════════════════════════════════════════════════════════════════════
 
-  👑 lead        pyproject.toml, justfile, .github/workflows/ci.yml, .pre-commit-config.yaml,
-                 .env.sample, README.md, LICENSE,
+  👑 lead        pyproject.toml, uv.lock, justfile, .github/workflows/ci.yml,
+                 .pre-commit-config.yaml, .env.sample, README.md, LICENSE,
                  src/boss_ai_monitoring/{__init__.py,config.py,cli.py},
+                 ALL package skeletons (the empty __init__.py in store/, ingest/, web/, jobs/ and
+                 across the tests/ tree — scaffolded once in Wave 0, then untouched),
+                 tests/conftest.py (shared fixtures: tmp-DB path, TestClient factory),
                  tests/unit/{test_config.py,test_cli.py}, tests/test_smoke.py, config.sample.yaml,
-                 .team/boss-ai-monitoring-build.{board,backlog}.md
+                 .team/boss-ai-monitoring-build.board.md
   🧱 store       src/boss_ai_monitoring/store/{schema.py,writer.py,views.sql},
                  tests/unit/store/**, tests/fixtures/duckdb/**
   📡 otlp        src/boss_ai_monitoring/ingest/otlp.py, tests/unit/ingest/test_otlp.py,
@@ -227,10 +245,19 @@ ROLES AND EXCLUSIVE FILE OWNERSHIP — no file has two writers, ever
                  any other file only under a lead-issued LOAN TICKET (backlog entry naming the
                  file, the defect, the owner cc'd; ownership returns when the ticket closes)
 
+THE EXPLICIT EXCEPTION — shared APPEND-ONLY files (the only multi-writer files in the run):
+`.team/boss-ai-monitoring-build.backlog.md` and `.team/boss-ai-monitoring-build.open-questions.md`.
+Any pane APPENDS a new entry ("file a backlog item" / "open an OQ" = append); only the LEAD edits
+or triages existing entries. Never rewrite another pane's entry. (The roster
+`.team/boss-ai-monitoring-build.spawn.json` is orchestrator-written, panes read-only.)
+
 ONE recorded handoff, at INGEST-FANOUT: 📡 otlp exposes a stable `get_router() -> APIRouter` from
 `ingest/otlp.py`; 🖥 web mounts it in `web/app.py` under a lead-issued LOAN TICKET on that one
 mount-point block (a marked `# otlp-mount` region) — otlp keeps ownership of the router's
-internals, web keeps ownership of the mount call. `store/` is a read/append dependency for every
+internals, web keeps ownership of the mount call. SERVING MODEL (decided rev 4): ONE FastAPI app
+(web/app.py, with the otlp router mounted), served on TWO uvicorn binds — 👑 lead's `cli.py`
+(`bam serve`) runs two uvicorn Server instances in one asyncio loop: `server.dashboard_port`
+(8000) and `server.otlp_port` (4318), same app object. Nobody else wires ports. `store/` is a read/append dependency for every
 ingest pane and for jobs (single-writer serialized behind one DuckDB connection owned by
 `store/writer.py` — nobody else opens a write connection). Cross-fence needs (e.g. web wants a new
 view in `store/views.sql`) go through the backlog, not a direct edit.
@@ -266,11 +293,18 @@ WAVE 0 — lead, minutes, before dispatching anyone:
   Scaffold in place per Phase 1: `uv init --package --python 3.13 --name boss-ai-monitoring`
   (hatchling backend, src/ layout, MIT LICENSE); `uv add fastapi uvicorn duckdb jinja2 httpx
   langsmith pydantic pydantic-settings pyyaml sse-starlette` + `uv add --dev pytest pytest-asyncio
-  respx ruff pyrefly codespell pre-commit playwright`; then `uv run playwright install chromium`
-  IMMEDIATELY (the package alone ships no browser — without this the Phase 6 smoke test fails on a
-  clean machine). Define the `bam` console script in `pyproject.toml` (`[project.scripts] bam =
-  "boss_ai_monitoring.cli:main"` — `bam serve` starts the app; the spec's quickstart and the DONE
-  report invoke `uv run bam serve`, so this entrypoint is load-bearing, RED-FIRST test included).
+  respx ruff pyrefly codespell pre-commit playwright` + `uv add --group notebooks marimo` (the
+  dep add is yours — pyproject.toml/uv.lock are lead-owned; ⚙️ jobs only WRITES the notebook in
+  Wave 4); then `uv run playwright install chromium` IMMEDIATELY (the package alone ships no
+  browser — without this the Phase 6 smoke test fails on a clean machine). Scaffold ALL package
+  skeletons now: empty `__init__.py` for `store/`, `ingest/`, `web/`, `jobs/` and the `tests/`
+  tree, plus `tests/conftest.py` (shared fixtures: tmp-DB path, TestClient factory) — workers
+  never create these, so two panes can't race on them. Define the `bam` console script in
+  `pyproject.toml` (`[project.scripts] bam = "boss_ai_monitoring.cli:main"`; RED-FIRST test
+  included): `bam serve` runs ONE FastAPI app on TWO uvicorn binds (dashboard_port 8000 +
+  otlp_port 4318, two Server instances in one asyncio loop — the decided serving model); `bam
+  config db-path` prints the RESOLVED DuckDB path from BamSettings (GATE's duckdb checks depend
+  on it — a bare `$BAM_DB_PATH` is unset in pane shells and would silently open an empty DB).
   Write `justfile` (`check` = ruff check + ruff format --check + pyrefly + codespell + pytest,
   `dev`, `fmt`, `docker-build`); write `.github/workflows/ci.yml` + `.pre-commit-config.yaml`;
   write `.env.sample` (CLAUDE_CODE_ENABLE_TELEMETRY, OTEL_METRICS_EXPORTER=otlp,
@@ -287,13 +321,14 @@ WAVE 0 — lead, minutes, before dispatching anyone:
   per the spec: `server` (dashboard port/bind, OTLP port/bind), `store` (db_path), `ingest`
   (jsonl scan interval, claude projects dir, langsmith poll interval + project), `jobs` (per-job
   enable flags). Ship `config.sample.yaml`. Publish `store/writer.py`'s intended interface
-  (function signatures + the event dict shape) to the backlog NOW so downstream panes can write
-  RED tests against a stub without waiting on store's GREEN. Baseline: `just check` exits 0 —
-  paste the output to the board before dispatching anyone.
+  (function signatures + the event dict shape) to the backlog NOW so the Wave-1 SHADOW panes
+  (🖥 web, ⚙️ jobs) can write RED tests against a stub without waiting on store's GREEN.
+  Baseline: `just check` exits 0 — paste the output to the board before dispatching anyone.
 
 WAVE 1 — parallel; 🧱 store is the critical path, unblock it first:
   🧱 store (Phase 2): DuckDB schema (`CREATE TABLE IF NOT EXISTS`, idempotent), the `events` table
-    (event_id pk, ts, source, event_type, session_id, prompt_id, model, git_sha, agent_name,
+    (event_id pk, ts, source, event_type, session_id, prompt_id, request_id — nullable, the API
+    request identifier that keys the JSONL↔OTel dedupe (G6) — model, git_sha, agent_name,
     skill_name, tool_name, cost_usd, duration_ms, 4 token-class columns, success, cwd, JSON
     `payload`), an `ingest_cursors` table, a batched Appender writer (buffers N events / T ms,
     atomic flush, idempotent on event_id, single-writer serialized behind one connection), and
@@ -351,8 +386,9 @@ WAVE 3 — INTEGRATE, once at least the otlp path is GREEN end-to-end:
     jobs files a backlog item specifying the query/shape, 🖥 web wires the footer.
 
 WAVE 4 — PACKAGE, once web + otlp are integrated:
-  ⚙️ jobs (Phase 9): `uv add --group notebooks marimo`; `notebooks/explore.py` — READ-ONLY DuckDB
-    connection (avoids the single-writer conflict with the running app). Multi-stage `Dockerfile`
+  ⚙️ jobs (Phase 9): `notebooks/explore.py` — READ-ONLY DuckDB connection (avoids the
+    single-writer conflict with the running app); the marimo dependency was already added by the
+    lead in Wave 0 (pyproject.toml is lead-owned — do not run `uv add`). Multi-stage `Dockerfile`
     + `compose.yaml` — one service, ports 8000 (dashboard) + 4318 (OTLP), a volume for the DuckDB
     file, a READ-ONLY mount for `~/.claude/projects`; document the macOS
     `host.docker.internal` nuance for Claude Code → container OTLP delivery. File a backlog item
@@ -374,10 +410,12 @@ FSM
     -> INGEST-FANOUT (📡 otlp Phase 3, 📜 jsonl Phase 4+5, in parallel, once store is GREEN)
     -> INTEGRATE    (🖥 web Phase 6+7 wired to live events; ⚙️ jobs Phase 8 wired to live events)
     -> PACKAGE       (⚙️ jobs Phase 9: marimo, docker, docs)
-    -> GATE          (✅ validator PERSONALLY runs `just check` AND full `uv run pytest -q` AND
-        |              the OTLP curl round-trip AND the 3-source DuckDB count AND the LangSmith
-        |              read-back cross-check AND `docker compose up --build`; ALL must pass; raw
-        |              output PASTED into the board — a described pass is a failure)
+    -> GATE          (✅ validator PERSONALLY runs the full 8-point checklist in
+        |              specs/boss-ai-monitoring/briefs/validator.md — just check, full pytest,
+        |              OTLP curl round-trip, 3-source DuckDB count, LangSmith read-back
+        |              cross-check, docker compose round-trip, marimo read-only boot, agent-loop
+        |              artifacts; ALL must pass; raw output PASTED into the board — a described
+        |              pass is a failure)
         |- CLEAN  -> DONE
         |- DIRTY  -> FIX -> GATE (loop)
         \- ERROR  -> NEEDS-HUMAN
@@ -516,6 +554,10 @@ GOTCHAS — inherited from the macos-ci build lineage plus boss-cmux-skill speci
   and read-only inside the Docker container.
 - `just check` is the only definition of done — a broken lint/type/test gate blocks GATE
   regardless of how much feature work is finished.
+- FAST-LOOP DISCIPLINE (user directive): iterate against `uv run bam serve` from the repo —
+  bring `docker compose` up the MINIMUM number of times (first working build, then GATE). Never
+  rebuild the image to test a code change; if compose ever includes external services, leave
+  them running and point the local `uv run` app at them via `BAM_*` env config.
 - The spec HTML's inline status markers are cosmetic reference only this run (see BINDING LESSON
   7) — don't spend a turn editing them; spend it on `.team/boss-ai-monitoring-build.board.md`.
 
@@ -528,17 +570,21 @@ DONE REPORT — lead compiles, orchestrator relays to the human, in this order
      red-first counts per pane.
   c. OTLP curl round-trip: `curl -sf -X POST localhost:4318/v1/logs -d @tests/fixtures/otlp/api_request.json
      -H 'Content-Type: application/json'` then reload `/` — fixture event visible, pasted.
-  d. `duckdb $BAM_DB_PATH "SELECT source, count(*) FROM events GROUP BY 1"` — otlp, jsonl, and
-     langsmith all > 0, pasted. Generate the live data like this (one command covers all three
-     sources): with the app running, the validator launches ONE headless session —
-     `claude -p "say hi" ` with CLAUDE_CODE_ENABLE_TELEMETRY=1 and the OTEL_* vars from
-     `.env.sample` pointed at localhost:4318 — which emits real OTLP events AND writes a real
-     `~/.claude/projects` JSONL transcript; the LangSmith tracing plugin (TRACE_TO_LANGSMITH,
-     ambient) covers the third source on the poller's next cycle.
+  d. `duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"` —
+     otlp, jsonl, and langsmith all > 0, pasted (always the resolved-path form: a bare
+     `$BAM_DB_PATH` is unset in pane shells and silently opens an empty DB). Generate the live
+     data with ONE hook-safe command covering all three sources — with the app running, the
+     validator launches one headless session:
+       CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_METRICS_EXPORTER=otlp OTEL_LOGS_EXPORTER=otlp \
+       OTEL_EXPORTER_OTLP_PROTOCOL=http/json OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+       claude -p "say hi"
+     which emits real OTLP events AND writes a real `~/.claude/projects` JSONL transcript; the
+     LangSmith tracing plugin (TRACE_TO_LANGSMITH, ambient) covers the third source on the
+     poller's next cycle (default 60s — wait for it).
   d2. LangSmith read-back cross-check: `langsmith run list --project "$LANGSMITH_PROJECT"
-     --limit 10` output pasted next to `duckdb $BAM_DB_PATH "SELECT count(*) FROM events WHERE
-     source='langsmith'"` — the runs LangSmith reports and the rows we ingested must be
-     consistent (unmatched runs allowed only in the visible LangSmith-only bucket).
+     --limit 10` output pasted next to `duckdb "$(uv run bam config db-path)" "SELECT count(*)
+     FROM events WHERE source='langsmith'"` — the runs LangSmith reports and the rows we ingested
+     must be consistent (unmatched runs allowed only in the visible LangSmith-only bucket).
   e. `docker compose up --build` round-trip result, pasted.
   f. `uvx marimo run notebooks/explore.py` opens read-only against a live DB without errors.
   g. Phase 7 agent-loop artifacts: `docs/AGENT_LOOP.md` + before/after screenshots under
@@ -558,7 +604,7 @@ Then start the heartbeat and do not stop until DONE or NEEDS-HUMAN.
 ```bash
 cd /Users/bossjones/dev/bossjones/boss-ai-monitoring
 just check && uv run pytest -q && echo "trustworthy"
-duckdb "$BAM_DB_PATH" "SELECT source, count(*) FROM events GROUP BY 1"   # otlp/jsonl/langsmith all > 0
+duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"   # otlp/jsonl/langsmith all > 0
 langsmith run list --project "$LANGSMITH_PROJECT" --limit 10             # read-back: LangSmith agrees with what we ingested
 docker compose up --build -d && curl -sf localhost:8000/ && docker compose down
 git log --oneline -8   # phase-boundary commits, all local, nothing pushed

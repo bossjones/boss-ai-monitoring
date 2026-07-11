@@ -18,8 +18,10 @@ prefer events (delta temporality makes raw metrics annoying).
   `api_request`, `tool_result`, `tool_decision`, `user_prompt`, `compaction`, `api_error`,
   plus one metrics export.
 - RED: tests POSTing fixtures to `/v1/logs` and `/v1/metrics` assert correct ObsEvent rows land
-  (cost, tokens, session_id, prompt_id extracted from OTel attributes) and the correct OTLP
-  response envelope is returned.
+  (cost, tokens, session_id, prompt_id, **request_id** — the API request identifier attribute on
+  `api_request` events, nullable elsewhere — extracted from OTel attributes) and the correct
+  OTLP response envelope is returned. `request_id` is load-bearing: it keys the JSONL↔OTel
+  dedupe and cost exclusion (G6).
 - GREEN: `ingest/otlp.py` — parse OTLP JSON (`resourceLogs` → `scopeLogs` → `logRecords`), map
   attributes → ObsEvent columns, everything else into `payload`.
 - RED→GREEN idempotency: replaying the same fixture batch creates no duplicate rows.
@@ -47,10 +49,15 @@ FastAPI `TestClient` + canned fixtures — hermetic, no network. Edge cases the 
 - `uv run pytest tests/unit/ingest/test_otlp.py -q` — all fixture and edge-case tests green.
 - `just check` — clean.
 - Manual E2E (validator will re-run): `just dev` + one real Claude Code prompt →
-  `duckdb $BAM_DB_PATH "SELECT event_type, count(*) FROM events GROUP BY 1"` shows live rows.
+  `duckdb "$(uv run bam config db-path)" "SELECT event_type, count(*) FROM events GROUP BY 1"`
+  shows live rows.
 
 ## The ONE recorded handoff
 
 You expose a stable `get_router() -> APIRouter` from `ingest/otlp.py`; 🖥 web mounts it in
 `web/app.py` under a lead-issued LOAN TICKET on the marked `# otlp-mount` block. You keep
 ownership of the router's internals; web keeps ownership of the mount call.
+
+Serving model (decided rev 4 — you do NOT wire ports): one FastAPI app, two uvicorn binds. The
+lead's `bam serve` serves the mounted app on both :8000 and :4318; your router just needs to
+answer `/v1/logs` + `/v1/metrics` wherever the app is mounted.

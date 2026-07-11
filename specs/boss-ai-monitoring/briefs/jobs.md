@@ -49,10 +49,11 @@ corrections and 1 drift day must yield exactly those rows). Edge cases the spec 
 
 ### 1. marimo exploration notebook
 
-- `uv add --group notebooks marimo`; write `notebooks/explore.py`: **read-only DuckDB
-  connection** (avoids the single-writer conflict with the running app), reactive SQL cells for
-  "why did Tuesday cost $9?" digging — per-day drill-down, per-session breakdown, token-class
-  mix, tool failure explorer.
+- Write `notebooks/explore.py` (the marimo dependency was already added by the lead in Wave 0 —
+  pyproject.toml/uv.lock are lead-owned, do NOT run `uv add`): **read-only DuckDB connection**
+  (avoids the single-writer conflict with the running app), reactive SQL cells for "why did
+  Tuesday cost $9?" digging — per-day drill-down, per-session breakdown, token-class mix, tool
+  failure explorer.
 - Propose README docs (via backlog): `uvx marimo edit notebooks/explore.py` and `marimo run` app
   mode.
 
@@ -63,6 +64,12 @@ corrections and 1 drift day must yield exactly those rows). Edge cases the spec 
   DuckDB file; a **read-only** mount for `~/.claude/projects`; document the macOS
   `host.docker.internal` nuance for Claude Code → container OTLP delivery.
 - Local `uv run` stays the documented primary dev path; Docker is the deployment convenience.
+- **Fast-loop discipline (user directive):** bring the container up the MINIMUM number of times —
+  ideally once when the Dockerfile/compose first work, once at GATE. All code iteration happens
+  against `uv run bam serve` from the repo (reload, no image rebuild). If compose ever grows
+  external services beyond the app itself, leave them up in the background and point the local
+  `uv run` app at them via `BAM_*` config env vars — never rebuild the app image to test a code
+  change. Document this dev-loop split in the README proposal.
 
 ### 3. Docs (proposed via backlog — README is lead-owned)
 

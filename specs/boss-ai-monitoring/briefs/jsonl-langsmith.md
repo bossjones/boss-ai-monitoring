@@ -31,7 +31,9 @@ was down. Incremental reader over `~/.claude/projects/` with per-file byte-offse
 - RED→GREEN dedupe: when an OTLP event with the same **`session_id + request_id`** already
   exists, the JSONL row is marked `source=jsonl` shadow and **excluded from cost views** (OTel
   cost is authoritative; JSONL costs are estimates and flagged as such).
-- RED→GREEN: per-session **`git_sha`/`cwd` extraction** from transcript metadata where present.
+- RED→GREEN: per-session **`git_sha`/`cwd` extraction** from transcript metadata where present,
+  and **`request_id` extraction** from each entry's `requestId` field — it populates the
+  `events.request_id` column that the dedupe above joins on.
 
 ### Phase 4 testing strategy
 
@@ -91,7 +93,9 @@ respx-mocked httpx transport — hermetic, deterministic. Edge cases the spec re
 ### Live self-check (you and the validator)
 
 `langsmith run list --project "$LANGSMITH_PROJECT"` — compare what LangSmith says exists against
-`duckdb $BAM_DB_PATH "SELECT count(*) FROM events WHERE source='langsmith'"`. Auth is ambient;
-never print the env values. The CLI also has `trace get` / `thread list` for digging into a
-specific join question. If the `thread_id` ↔ `session.id` join misbehaves, that is the spec's
-named RISK #2 — file an OQ immediately with what you observed.
+`duckdb "$(uv run bam config db-path)" "SELECT count(*) FROM events WHERE source='langsmith'"`.
+Auth is ambient; never print the env values. NOTE the two project vars: the poller ingests
+`$CC_LANGSMITH_PROJECT`, the read-back queries `$LANGSMITH_PROJECT` — PREFLIGHT asserts they name
+the same project, so the comparison is apples-to-apples. The CLI also has `trace get` /
+`thread list` for digging into a specific join question. If the `thread_id` ↔ `session.id` join
+misbehaves, that is the spec's named RISK #2 — file an OQ immediately with what you observed.

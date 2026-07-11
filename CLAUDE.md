@@ -31,8 +31,9 @@ uv run pytest tests/unit/store -q         # one suite
 uv run pytest tests/unit/store/test_writer.py::test_name -q   # one test
 uvx ruff check <file>      # lint one file
 uv run pyrefly check       # type check (pyrefly — NOT mypy/ty/basedpyright)
-just dev                   # run the app locally (uvicorn reload); later: uv run bam serve
+just dev                   # run the app locally with reload (wraps uv run bam serve — both ports)
 docker compose up --build  # containerized app: ports 8000 (dashboard) + 4318 (OTLP)
+uv run bam config db-path  # print the resolved DuckDB path (use this in shell commands, never a bare $BAM_DB_PATH)
 ```
 
 Verification CLIs (installed on this machine):
@@ -55,6 +56,10 @@ langsmith run list --project "$LANGSMITH_PROJECT"                        # LangS
   everything else open read-only connections.
 - **OTLP is http/json only** on :4318 — no gRPC, no otel-collector.
 - **Frontend**: htmx vendored as a single static file; no npm, no build step.
+- **Fast dev loop**: iterate against `uv run bam serve` locally; bring `docker compose` up the
+  minimum number of times (packaging validation only). Never rebuild the image to test a code
+  change — if compose gains external services, leave them running and point the local app at
+  them via `BAM_*` env config.
 - **Privacy**: OTel content-capture flags stay OFF by default; `~/.claude/projects` is mounted
   read-only wherever it is read.
 

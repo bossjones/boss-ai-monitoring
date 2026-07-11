@@ -3,10 +3,14 @@
 > Derived from `../boss-ai-monitoring.html` (canonical) on 2026-07-11. Read `shared.md` first.
 > If this conflicts with the HTML or observed behavior, the evidence wins — file an OQ.
 
-**You own:** `pyproject.toml`, `justfile`, `.github/workflows/ci.yml`, `.pre-commit-config.yaml`,
-`.env.sample`, `README.md`, `LICENSE`, `src/boss_ai_monitoring/{__init__.py,config.py,cli.py}`,
+**You own:** `pyproject.toml`, `uv.lock`, `justfile`, `.github/workflows/ci.yml`,
+`.pre-commit-config.yaml`, `.env.sample`, `README.md`, `LICENSE`,
+`src/boss_ai_monitoring/{__init__.py,config.py,cli.py}`, ALL package skeletons (the empty
+`__init__.py` in `store/`, `ingest/`, `web/`, `jobs/` and across the `tests/` tree — scaffolded
+once in Wave 0, then untouched), `tests/conftest.py`,
 `tests/unit/{test_config.py,test_cli.py}`, `tests/test_smoke.py`, `config.sample.yaml`, the
-board and backlog. You also dispatch all work, issue LOAN TICKETS, and commit at phase boundaries.
+board. You also dispatch all work, issue LOAN TICKETS, triage the shared append-only backlog and
+open-questions files, and commit at phase boundaries.
 
 ## 1. Package skeleton, in place
 
@@ -17,14 +21,26 @@ board and backlog. You also dispatch all work, issue LOAN TICKETS, and commit at
   `.gitignore`, the env files, `CLAUDE.md` are untouched. The pre-existing root `README.md` is a
   placeholder you EXTEND in place (its sections are marked *(filled in by the build)*).
 - `uv add fastapi uvicorn duckdb jinja2 httpx langsmith pydantic pydantic-settings pyyaml
-  sse-starlette` and `uv add --dev pytest pytest-asyncio respx ruff pyrefly codespell pre-commit
-  playwright`, then **immediately** `uv run playwright install chromium` (the package ships no
-  browser; Phase 6's smoke test needs it).
-- **`bam` console script**: `[project.scripts] bam = "boss_ai_monitoring.cli:main"`. `bam serve`
-  starts the app (`uv run bam serve` is the spec's documented quickstart and appears in the DONE
-  report). RED-FIRST test in `tests/unit/test_cli.py`.
+  sse-starlette`, `uv add --dev pytest pytest-asyncio respx ruff pyrefly codespell pre-commit
+  playwright`, and `uv add --group notebooks marimo` (ALL dep adds are yours —
+  pyproject.toml/uv.lock have one writer; ⚙️ jobs only writes the notebook file in Wave 4). Then
+  **immediately** `uv run playwright install chromium` (the package ships no browser; Phase 6's
+  smoke test needs it).
+- **Scaffold all package skeletons NOW**: empty `__init__.py` for `store/`, `ingest/`, `web/`,
+  `jobs/` and the `tests/` tree, plus a minimal `tests/conftest.py` (shared fixtures: tmp-DB
+  path, TestClient factory). Workers never create these — that's how two panes writing into
+  `ingest/` avoid racing on the same file.
+- **`bam` console script**: `[project.scripts] bam = "boss_ai_monitoring.cli:main"`, RED-FIRST
+  test in `tests/unit/test_cli.py`. Two subcommands:
+  - `bam serve` — the spec's documented quickstart. Serving model (decided rev 4): ONE FastAPI
+    app (web/app.py, otlp router mounted), TWO uvicorn Server instances in one asyncio loop —
+    `server.dashboard_port` (8000) and `server.otlp_port` (4318), same app object.
+  - `bam config db-path` — prints the RESOLVED DuckDB path from `BamSettings`. GATE's duckdb
+    checks use `duckdb "$(uv run bam config db-path)"`; a bare `$BAM_DB_PATH` is unset in pane
+    shells and silently opens an empty DB.
 - `justfile`: `check` = ruff check + ruff format --check + pyrefly check + codespell + pytest;
-  `dev` = uvicorn --reload; `fmt`; `docker-build`.
+  `dev` = `uv run bam serve` with reload (both ports must be live in dev — the OTLP curl and
+  live-telemetry checks hit :4318); `fmt`; `docker-build`.
 - `.github/workflows/ci.yml`: uv setup → `just check`. It must exactly mirror `just check` — it
   is validated BY CONSTRUCTION this run (no push happens; record its first real GitHub run as a
   DEFERRED board item).
