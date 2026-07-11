@@ -1,6 +1,6 @@
 # boss-cmux — boss-ai-monitoring BUILD run
 
-> **STATUS: CURRENT** (rev 2, 2026-07-11). First prompt in this repo's lineage — there is no prior
+> **STATUS: CURRENT** (rev 3, 2026-07-11). First prompt in this repo's lineage — there is no prior
 > research/verify run to supersede. The spec ([`specs/boss-ai-monitoring/boss-ai-monitoring.html`](../specs/boss-ai-monitoring/boss-ai-monitoring.html))
 > is already detailed, decided (every open question resolved via `AskUserQuestion` at authoring
 > time), and phase-ordered — so this run goes straight to **build**, TDD red-first, implementing
@@ -14,6 +14,12 @@
 > G13 (test layout authoritative) + G14 (ambient LangSmith auth + `langsmith` CLI read-back loop)
 > added; DONE report gains a live-telemetry generation recipe and a LangSmith read-back
 > cross-check (d2).
+>
+> **Rev 3 changes** (same day): per-pane spec briefs extracted to
+> [`specs/boss-ai-monitoring/briefs/`](../specs/boss-ai-monitoring/briefs/) — the HTML stays the
+> canonical human-facing spec; agents read `shared.md` + their role brief instead (schemas, edge
+> cases, and acceptance criteria carried verbatim; deliberate run deviations flagged as
+> `RUN NOTE:`). Kickoff messages and BINDING LESSON 7 updated accordingly.
 
 ## Why this run is shaped the way it is
 
@@ -111,10 +117,16 @@ BINDING LESSONS — inherited from the macos-ci build lineage; every agent obeys
    `.env`, the direnv envrc, `.gitignore`, and `CLAUDE.md` are untouched by the scaffold
    (`CLAUDE.md` is human-owned and read-only this run); the pre-existing root `README.md` is a
    placeholder the lead EXTENDS in place, not a file to replace.
-7. THE SPEC HTML IS READ-ONLY REFERENCE. `specs/boss-ai-monitoring/boss-ai-monitoring.html` has
+7. THE SPEC HTML IS READ-ONLY REFERENCE — AND YOUR WORKING COPY IS YOUR BRIEF.
+   `specs/boss-ai-monitoring/boss-ai-monitoring.html` is the canonical, human-facing spec; it has
    inline `[]`/`[wip]`/`[x]`/`[f]` status markers, but nobody edits them during this run — durable
    phase-tracking lives in `.team/boss-ai-monitoring-build.board.md` instead. One HTML file with
    six agents fighting over its markup is a self-inflicted merge conflict; don't create one.
+   For day-to-day reference, each pane reads `specs/boss-ai-monitoring/briefs/shared.md` + its own
+   brief (per-pane markdown extractions of the spec, made 2026-07-11, also READ-ONLY this run) —
+   they carry your schemas, edge cases, and acceptance criteria without a 61KB HTML read. If a
+   brief and the HTML disagree, the HTML (and the evidence) wins — file an OQ; deliberate run
+   deviations are flagged inline as `RUN NOTE:` blocks.
 
 SCOPE. This run writes code, runs `uv`, `pytest`, `ruff`, `pyrefly`, `just` recipes, and
 `docker compose`, and makes LOCAL git commits at phase boundaries (conventional messages, current
@@ -183,8 +195,12 @@ Identity, so the human can tell everyone apart at a glance:
 Persist the roster to `.team/boss-ai-monitoring-build.spawn.json` (window UUID, workspace ref,
 role -> surface ref, sentinel `TASK-DONE`). Launch the SIX WORKERS first (type each launch line
 INTO its pane via send + send-key enter; kickoff = "You are <role> on team
-boss-ai-monitoring-build. Read .team/boss-ai-monitoring-build.backlog.md for your brief. Reply
-'ready: <role>' and wait for the lead."), wait ~6s, then launch the lead with its brief.
+boss-ai-monitoring-build. Read specs/boss-ai-monitoring/briefs/shared.md then
+specs/boss-ai-monitoring/briefs/<role-brief>.md — your spec brief — then
+.team/boss-ai-monitoring-build.backlog.md for dispatch. Reply 'ready: <role>' and wait for the
+lead."), wait ~6s, then launch the lead with its brief (the lead reads shared.md + lead.md the
+same way). Role -> brief file: lead->lead.md, store->store.md, otlp->otlp.md,
+jsonl->jsonl-langsmith.md, web->web.md, jobs->jobs.md, validator->validator.md.
 
 ════════════════════════════════════════════════════════════════════════════
 ROLES AND EXCLUSIVE FILE OWNERSHIP — no file has two writers, ever
@@ -203,8 +219,8 @@ ROLES AND EXCLUSIVE FILE OWNERSHIP — no file has two writers, ever
                  tests/unit/ingest/{test_jsonl.py,test_langsmith_poll.py},
                  tests/fixtures/{jsonl,langsmith}/**
   🖥 web         src/boss_ai_monitoring/web/** (app.py, templates/*.html, static/style.css),
-                 tests/e2e/test_dashboard.py, docs/AGENT_LOOP.md, docs/design-tokens.md,
-                 docs/img/agent-loop/**
+                 tests/unit/web/**, tests/e2e/test_dashboard.py, docs/AGENT_LOOP.md,
+                 docs/design-tokens.md, docs/img/agent-loop/**
   ⚙️ jobs        src/boss_ai_monitoring/jobs/**, notebooks/explore.py, Dockerfile, compose.yaml,
                  tests/unit/jobs/**, tests/integration/test_docker.py
   ✅ validator   .team/boss-ai-monitoring-build.validator-log.md — and NOTHING else by default;

@@ -11,8 +11,11 @@ JSONL transcripts, LangSmith runs) into one DuckDB file, served by a FastAPI + J
 The repo is currently **pre-build**: the Python package does not exist yet. Everything is specified in
 two authoritative documents:
 
-- `specs/boss-ai-monitoring/boss-ai-monitoring.html` — the full 9-phase spec (read-only reference;
-  do not edit its inline status markers during a build run).
+- `specs/boss-ai-monitoring/boss-ai-monitoring.html` — the full 9-phase spec, canonical and
+  human-facing (read-only reference; do not edit its inline status markers during a build run).
+  Agent-facing working copies live in `specs/boss-ai-monitoring/briefs/` — one scoped markdown
+  brief per build-team pane plus `shared.md`; read those instead of the HTML for day-to-day
+  reference. If a brief and the HTML disagree, the HTML wins.
 - `prompts/boss-ai-monitoring-build-team.md` — the multi-agent cmux build prompt that implements the
   spec. Its BINDING LESSONS, GROUND TRUTHS (G1–G14), and file-ownership map govern any build work
   here, even outside a team run.
