@@ -36,9 +36,11 @@ orchestrator heartbeat. Two things differ from that lineage, and both are load-b
 > sonnet.
 
 Decisions recorded at authoring time (2026-07-11): 7 panes, lead on **opus[1m]**, all 6 workers
-on **sonnet**; no `gh repo create` — the local repo already exists and stays local for this run
-(no remote is created, nothing is pushed); the spec HTML is treated as **read-only reference**
-for this run — nobody edits its inline status markers, durable progress lives in `.team/` instead.
+on **sonnet**; no `gh repo create` — the repo already exists (the `bossjones/boss-ai-monitoring`
+remote was published before this run), so the build team commits locally on the current branch and
+does **not** push (the human pushes/reviews after the run); the spec HTML is treated as
+**read-only reference** for this run — nobody edits its inline status markers, durable progress
+lives in `.team/` instead.
 
 ---
 
@@ -93,9 +95,11 @@ BINDING LESSONS — inherited from the macos-ci build lineage; every agent obeys
    UUID and the roster file. Re-resolve surface refs at the moment of use via
    `cmux list-pane-surfaces --workspace <ws>`, and scope every split/send with `--workspace`.
 5. Trust `cmux <cmd> --help` over memory; never guess a flag.
-6. THIS BUILD LANDS IN THIS REPO. `uv init --package --python 3.13 --name boss_ai_monitoring` at
-   the repo root. Do NOT run `gh repo create`. Do NOT create a git remote. Do NOT push. The
-   repo's existing `specs/`, `prompts/`, `.env`, `.gitignore` are untouched by the scaffold.
+6. THIS BUILD LANDS IN THIS REPO. `uv init --package --python 3.13 --name boss-ai-monitoring` at
+   the repo root (this yields the `src/boss_ai_monitoring/` module). Do NOT run `gh repo create`
+   (the `bossjones/boss-ai-monitoring` remote already exists). Do NOT push — commit locally on the
+   current branch; the human pushes/reviews after the run. The repo's existing `specs/`, `prompts/`,
+   `.env`, `.gitignore` are untouched by the scaffold.
 7. THE SPEC HTML IS READ-ONLY REFERENCE. `specs/boss-ai-monitoring/boss-ai-monitoring.html` has
    inline `[]`/`[wip]`/`[x]`/`[f]` status markers, but nobody edits them during this run — durable
    phase-tracking lives in `.team/boss-ai-monitoring-build.board.md` instead. One HTML file with
@@ -103,11 +107,12 @@ BINDING LESSONS — inherited from the macos-ci build lineage; every agent obeys
 
 SCOPE. This run writes code, runs `uv`, `pytest`, `ruff`, `pyrefly`, `just` recipes, and
 `docker compose`, and makes LOCAL git commits at phase boundaries (conventional messages, current
-branch). It does NOT: push, create a git remote, run `gh repo create`, switch branches, or delete
-the user's `~/.claude/projects` data (mounted read-only wherever it is read, and read-only inside
-Docker). Because no remote exists, the `.github/workflows/ci.yml` written in Phase 1 is validated
-BY CONSTRUCTION (it must exactly mirror `just check`) but is never run on GitHub this run — record
-that as a DEFERRED item on the board, do not silently skip it or fake a CI-green claim.
+branch). It does NOT: push, run `gh repo create`, switch branches, or delete the user's
+`~/.claude/projects` data (mounted read-only wherever it is read, and read-only inside Docker). The
+`bossjones/boss-ai-monitoring` remote exists, but this run does not push to it — the human pushes
+and reviews after the run, and CI runs on that push. So the `.github/workflows/ci.yml` written in
+Phase 1 is validated BY CONSTRUCTION this run (it must exactly mirror `just check`); record its
+first real GitHub run as a DEFERRED item on the board, and never fake a CI-green claim.
 
 ════════════════════════════════════════════════════════════════════════════
 WORKSPACE SETUP — exact recipe
@@ -213,7 +218,7 @@ STEP ASSIGNMENTS — waves, and the one barrier that matters
 ════════════════════════════════════════════════════════════════════════════
 
 WAVE 0 — lead, minutes, before dispatching anyone:
-  Scaffold in place per Phase 1: `uv init --package --python 3.13 --name boss_ai_monitoring`;
+  Scaffold in place per Phase 1: `uv init --package --python 3.13 --name boss-ai-monitoring`;
   `uv add fastapi uvicorn duckdb jinja2 httpx langsmith pydantic pydantic-settings pyyaml
   sse-starlette` + `uv add --dev pytest pytest-asyncio respx ruff pyrefly codespell pre-commit
   playwright`; write `justfile` (`check` = ruff + pyrefly + codespell + pytest, `dev`, `fmt`,
@@ -314,7 +319,8 @@ tests+N red-first-Y/N`.
 The BOARD IS THE DURABLE STATE: any restarted or confused agent is told "read
 .team/boss-ai-monitoring-build.board.md and resume from the recorded state." Local git commits at
 phase boundaries (SCAFFOLD baseline, STORE-CORE green, INGEST-FANOUT green, INTEGRATE green,
-GATE-clean) — lead commits, conventional messages, NEVER push, NEVER create a remote.
+GATE-clean) — lead commits, conventional messages, on the current branch. NEVER push (the
+`bossjones/boss-ai-monitoring` remote exists, but the human owns pushing after review).
 
 ════════════════════════════════════════════════════════════════════════════
 FAILURE HANDLING — roles are fixed; nobody negotiates during an incident
@@ -395,7 +401,9 @@ G9.  v1 quality scoring is deterministic/heuristic — no LLM-judge (Anthropic's
 G10. Dashboard and OTLP ports bind localhost by default, NO AUTH — single-user, single-host,
      trusted-network scope. Multi-user aggregation is explicitly out of scope.
 G11. Frontend htmx is vendored as a single static file — no npm, no build step.
-G12. This build lands IN this repo. No `gh repo create`, no new remote, no push.
+G12. This build lands IN this repo. Commit locally on the current branch — no `gh repo create`
+     (the `bossjones/boss-ai-monitoring` remote already exists), and do NOT push; the human owns
+     pushing to the remote after review.
 
 ════════════════════════════════════════════════════════════════════════════
 GOTCHAS — inherited from the macos-ci build lineage plus boss-cmux-skill specifics
@@ -457,7 +465,8 @@ git status --short     # confirm working tree matches what the board claims
 ```
 
 Read `.team/boss-ai-monitoring-build.open-questions.md` first — the `NEEDS-HUMAN` entries are
-yours. The deferred GitHub-CI validation is on the board; run it once a remote exists and it's
-cheap to `gh run watch`. The natural successor to this prompt is a small verify-style run over
+yours. The build team committed locally only; push the build branch to `origin`
+(`bossjones/boss-ai-monitoring`) when you're ready and `gh run watch` the first real CI run (the
+deferred item on the board). The natural successor to this prompt is a small verify-style run over
 whatever `<!-- UNVERIFIED -->`-equivalent gaps the build leaves behind (start with the two named
 spec RISKs: JSONL format drift and the LangSmith join).
