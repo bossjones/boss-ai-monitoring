@@ -23,9 +23,9 @@ Committed `b4a47a2`. Gate: `just check` green, pyrefly 0 errors, **173 tests**.
 | 👑 lead | scaffold, config, cli, gate files, board | 1 | 🟢 SCAFFOLD done |
 | 🧱 store | schema.py, writer.py, views.sql | 2 | 🟢 GREEN, committed `fa1f7e5` (tests+30, red-first-Y) |
 | 📡 otlp | ingest/otlp.py | 3 | 🟢 DONE — validator-verified; BL-06 stopgap removed (`30cb2b0`). Filed OQ-02 + OQ-03 |
-| 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🔵 Phase 4 done, Phase 5 (LangSmith poller) in flight |
+| 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🟢 DONE (`ad25e17`) — LIVE LangSmith read-back: 50 runs, 100% session match. Confirmed OQ-04 |
 | 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🔵 Wave 3: Phase 6 live wiring (holds LT-01) |
-| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Wave 3: Phase 8 live wiring |
+| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Phase 8 done (`61ede57`, tests+50); Phase 9 PACKAGE dispatched |
 | ✅ validator | validator-log.md, GATE checklist | GATE | 🔵 verified store; now auditing otlp |
 
 **Also open:** 🧱 store is fixing OQ-02 (the writer race) — see Open questions below. It is GREEN
@@ -156,6 +156,32 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
   ports.
 
 ## Open questions
+
+- **OQ-04 — 🚨 SHIP-BLOCKER, OPEN, owned by 🧱 store.** Filed by ⚙️ jobs; **independently
+  reproduced by the lead with raw duckdb, zero project code involved.** `connect_read_only(path)`
+  CANNOT coexist with a live `get_writer()` connection in the same process — duckdb refuses a
+  second connection to the same file with a different configuration while one is open
+  (`ConnectionException: Can't open a connection to same database file with a different
+  configuration than existing connections`).
+  **Why this is severity-1 and not a test nuisance:** `bam serve` is ONE process — web routes, the
+  mounted OTLP router, and jobs' scheduler all share it. The moment any event is ingested the
+  writer singleton is live and open, and from then on *every* web read and *every* jobs run that
+  calls `connect_read_only()` raises. That is a 500 on the dashboard on **every real run past the
+  first ingested event**. It is currently masked only because jobs rewrote its tests to use
+  short-lived `EventWriter` context managers that close before reading — which sidesteps it in
+  tests and does **not** reflect how `bam serve` actually runs. This is exactly the class of bug a
+  green test suite hides.
+  **Fix dispatched:** make `connect_read_only()` writer-aware — hand back a `.cursor()` off the
+  live connection when a writer for that path exists (verified working: duckdb cursors share one
+  connection via MVCC and dodge the config check), falling back to a fresh read-only connect only
+  when no writer is live. Public signature unchanged. Red-first test required: get_writer → write →
+  flush → connect_read_only → query must FAIL today.
+  **CONFIRMED INDEPENDENTLY BY 📜 jsonl TOO — and it is now breaking `just check`** via
+  `tests/e2e/test_dashboard.py`. So the gate is RED until store lands this. Three panes hit the
+  same wall from three directions; that is the system working.
+  **PROCESS NOTE:** ⚙️ jobs and 📜 jsonl each self-committed (`61ede57`, `ad25e17`). Commits are
+  lead-owned at phase boundaries; no harm done, both are folded into INTEGRATE, and both panes have
+  been told to leave committing to the lead from here.
 
 - **OQ-02 — CLOSED. Fixed at the source by 🧱 store (`b4a47a2`), independently verified by
   ✅ validator (red-first reproduced 5/5, idempotency proven under cross-thread collisions), and
