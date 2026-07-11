@@ -1,0 +1,38 @@
+# boss-ai-monitoring — `just check` is the definition of done.
+# .github/workflows/ci.yml mirrors `check` EXACTLY; keep them in lockstep.
+
+default:
+    @just --list
+
+# The full gate: lint, format, types (pyrefly — not mypy/ty), spelling, tests.
+check: lint fmt-check typecheck spell test
+
+lint:
+    uv run ruff check .
+
+fmt-check:
+    uv run ruff format --check .
+
+typecheck:
+    uv run pyrefly check
+
+spell:
+    uv run codespell
+
+test:
+    uv run pytest -q
+
+fmt:
+    uv run ruff format .
+    uv run ruff check --fix .
+
+# Local dev loop: ONE app, TWO binds (dashboard :8000 + OTLP :4318).
+dev:
+    uv run bam serve
+
+# Packaging validation only — iterate with `just dev`, not by rebuilding the image.
+docker-build:
+    docker compose build
+
+db-path:
+    @uv run bam config db-path

@@ -1,0 +1,38 @@
+# boss-ai-monitoring — sample configuration.
+#
+# Copy to `config.yaml` (or point $BAM_CONFIG at it) and edit. Every key is optional; anything you
+# omit falls back to the code default shown here.
+#
+# PRECEDENCE: environment variables > this file > code defaults.
+# Env vars use the BAM_ prefix and __ for nesting:
+#   BAM_SERVER__DASHBOARD_PORT=9000     overrides server.dashboard_port
+#   BAM_STORE__DB_PATH=~/bam.duckdb     overrides store.db_path
+# The env-var reference lives in the sample env file at the repo root.
+
+server:
+  # ONE FastAPI app, TWO binds — `bam serve` runs both in a single asyncio loop.
+  dashboard_port: 8000
+  dashboard_bind: 127.0.0.1   # localhost only: single-user, no auth by design
+  otlp_port: 4318             # OTLP http/json receiver; no gRPC, no collector
+  otlp_bind: 127.0.0.1
+
+store:
+  # The one DuckDB file. `bam config db-path` prints the resolved value of this key.
+  db_path: ~/.local/share/boss-ai-monitoring/bam.duckdb
+  batch_size: 500             # events buffered before the Appender flushes
+  flush_interval_ms: 1000     # ...or this long, whichever comes first
+
+ingest:
+  jsonl_scan_interval_s: 15           # how often to re-scan ~/.claude/projects for new bytes
+  claude_projects_dir: ~/.claude/projects   # read-only, always
+  langsmith_poll_interval_s: 60       # LangSmith rate limit is ~10 req/10s — cursor polls only
+  langsmith_project: null             # defaults to $LANGSMITH_PROJECT when unset
+  otlp_max_body_bytes: 10485760       # reject oversized OTLP posts rather than OOM
+
+jobs:
+  # Trailing background jobs — deterministic heuristics, never on the agent's critical path.
+  correction_scan_enabled: true
+  drift_check_enabled: true           # OTel-vs-JSONL divergence self-check
+  error_classification_enabled: true
+  interval_s: 300
+  jitter_s: 30

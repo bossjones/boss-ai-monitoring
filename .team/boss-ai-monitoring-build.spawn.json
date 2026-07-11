@@ -1,0 +1,16 @@
+{
+  "team": "boss-ai-monitoring-build",
+  "window_uuid": "5F182202-5C45-4963-8264-FEDF8E34A06E",
+  "workspace_uuid": "B8611165-AC25-49D9-97F8-10F9E3775476",
+  "sentinel": "TASK-DONE",
+  "roles": {
+    "lead":      "E778CD91-1EE4-4EAA-A350-EC4048CAF69A",
+    "store":     "0C2140D5-4D38-4A85-BF2F-E13474FD71A1",
+    "otlp":      "3EAC420D-EB9F-4FCC-936D-F34BE18A2296",
+    "jsonl":     "6B5DBC4A-6412-4533-80C7-0EC7965F2CF5",
+    "web":       "3F8BBDCB-1408-421F-ACAD-6C869E894CFC",
+    "jobs":      "B8EEE4A4-C2C9-40AA-8EB8-5A8E65C5B78A",
+    "validator": "62C718AE-8424-46C2-A8A8-53301E2E1833"
+  },
+  "note": "Surface refs (surface:N) are positional and renumber; these UUIDs are the stable handles. Orchestrator-written, panes read-only."
+}
