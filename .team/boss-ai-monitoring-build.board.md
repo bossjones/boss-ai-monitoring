@@ -22,7 +22,7 @@ Committed `b4a47a2`. Gate: `just check` green, pyrefly 0 errors, **173 tests**.
 |---|---|---|---|
 | 👑 lead | scaffold, config, cli, gate files, board | 1 | 🟢 SCAFFOLD done |
 | 🧱 store | schema.py, writer.py, views.sql | 2 | 🟢 GREEN, committed `fa1f7e5` (tests+30, red-first-Y) |
-| 📡 otlp | ingest/otlp.py | 3 | 🟢 Phase 3 done; validator verifying. Filed OQ-02 + OQ-03 |
+| 📡 otlp | ingest/otlp.py | 3 | 🟢 DONE — validator-verified; BL-06 stopgap removed (`30cb2b0`). Filed OQ-02 + OQ-03 |
 | 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🔵 Phase 4 done, Phase 5 (LangSmith poller) in flight |
 | 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🔵 Wave 3: Phase 6 live wiring (holds LT-01) |
 | ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Wave 3: Phase 8 live wiring |
@@ -157,7 +157,12 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 
 ## Open questions
 
-- **OQ-02 — RESOLVED (fixed red-first by 🧱 store, committed `b4a47a2`).** 📡 otlp found a genuine race in
+- **OQ-02 — CLOSED. Fixed at the source by 🧱 store (`b4a47a2`), independently verified by
+  ✅ validator (red-first reproduced 5/5, idempotency proven under cross-thread collisions), and
+  📡 otlp's local `_flush_lock` stopgap removed (`30cb2b0`) only AFTER proving its concurrency test
+  still passes without it against the fixed writer — so the fix genuinely covers the otlp path
+  rather than being masked by the stopgap. The concurrency tests stay as regression guards on the
+  shared singleton. Original finding below.** 📡 otlp found a genuine race in
   `store/writer.py`: `EventWriter.flush()` holds the lock only around the buffer swap and releases
   it *before* `_flush_batch` runs `BEGIN TRANSACTION`/`DELETE`/`INSERT`/`COMMIT` on the one shared
   connection. Six concurrent posts through a single `get_writer()` singleton reliably raise
