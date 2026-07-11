@@ -67,4 +67,5 @@ project-excludes = ["**/.venv/**", "notebooks/**"]
 
 [tool.codespell]
 skip = "./.git,./.venv,./uv.lock,./specs,./logs,./.ruff_cache,./htmlcov,./docs/img,./src/boss_ai_monitoring/web/static"
-ignore-words-list = "asend,nd"
+# iterm: a real terminal name in captured OTLP fixtures (terminal.type=iTerm.app), not a typo.
+ignore-words-list = "asend,nd,iterm"

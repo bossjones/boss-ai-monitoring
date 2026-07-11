@@ -9,19 +9,45 @@
 SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE -> DONE
 ```
 
-**Current state: STORE-CORE** (Wave 1 dispatched)
+**Current state: INGEST-FANOUT** (Wave 2 dispatched 2026-07-11)
 
 ## Roster
 
 | pane | role | phase(s) | state |
 |---|---|---|---|
 | 👑 lead | scaffold, config, cli, gate files, board | 1 | 🟢 SCAFFOLD done |
-| 🧱 store | schema.py, writer.py, views.sql | 2 | 🔵 Wave 1 (critical path) |
-| 📡 otlp | ingest/otlp.py | 3 | ⏸ waits on store GREEN |
-| 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | ⏸ waits on store GREEN |
-| 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🔵 Wave 1 SHADOW (hermetic scaffold) |
-| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Wave 1 SHADOW (hermetic scaffold) |
-| ✅ validator | validator-log.md, GATE checklist | GATE | ⏸ standing substitute |
+| 🧱 store | schema.py, writer.py, views.sql | 2 | 🟢 GREEN, committed `fa1f7e5` (tests+30, red-first-Y) |
+| 📡 otlp | ingest/otlp.py | 3 | 🟢 Phase 3 done; validator verifying. Filed OQ-02 + OQ-03 |
+| 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🔵 Phase 4 done, Phase 5 (LangSmith poller) in flight |
+| 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🔵 Wave 3: Phase 6 live wiring (holds LT-01) |
+| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Wave 3: Phase 8 live wiring |
+| ✅ validator | validator-log.md, GATE checklist | GATE | 🔵 verified store; now auditing otlp |
+
+**Also open:** 🧱 store is fixing OQ-02 (the writer race) — see Open questions below. It is GREEN
+otherwise; the race is a defect against its own published contract, not a regression of Phase 2.
+
+**Gate state:** `just check` green at **172 tests** (lead's run). One lead-owned fix on the way:
+codespell flagged "iTerm" inside otlp's captured fixtures — a false positive on a real terminal
+name, so it was added to `ignore-words-list` in pyproject rather than corrupting a fixture to
+appease a spellchecker.
+
+## STORE-CORE gate — `just check`, green (lead's own run, not store's claim)
+
+```
+uv run pyrefly check
+ INFO 0 errors (1 warning not shown)
+uv run pytest -q
+121 passed, 1 warning in 0.91s
+```
+
+The 13 OQ-01 pyrefly errors (9 store, 4 web) are GONE. ✅ validator is independently confirming
+they were fixed with real None guards and not papered over with a `type: ignore`, a widened
+pyrefly baseline, or a lint exclusion — and is proving RED-FIRST by gutting store's implementation
+and checking the tests actually fail. Its verdict lands in `.validator-log.md`.
+
+> LEAD NOTE: Wave 2 was dispatched in PARALLEL with that audit rather than serialized behind it —
+> store's GREEN is confirmed by the lead's own `just check`, and otlp/jsonl touch disjoint files.
+> If the audit finds a red-first violation, 🧱 store fixes it without blocking the ingest panes.
 
 ## Wave plan
 
@@ -38,8 +64,8 @@ SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE 
 
 | phase | commit | status |
 |---|---|---|
-| SCAFFOLD baseline | `feat(scaffold): uv package, config, bam CLI, TDD harness` | ✅ committed |
-| STORE-CORE green | — | pending |
+| SCAFFOLD baseline | `2994737 feat(scaffold): uv package, config, bam CLI, TDD harness` | ✅ committed |
+| STORE-CORE green | `fa1f7e5 feat(store): DuckDB schema, batched writer, SQL views; web shadow scaffold` | ✅ committed |
 | INGEST-FANOUT green | — | pending |
 | INTEGRATE green | — | pending |
 | PACKAGE green | — | pending |
@@ -116,7 +142,35 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 - The pre_tool_use hook blocks Bash containing `rm `, `--rm`, and the env-file token — so the
   sample env file can only be touched with the Read/Edit/Write tools, never via shell.
 
+## Loan tickets
+
+- **LT-01 — `# otlp-mount` region in `src/boss_ai_monitoring/web/app.py`.** Issued to 🖥 web
+  2026-07-11 (Wave 3). Scope: the MOUNT CALL ONLY, inside that marked region, for 📡 otlp's
+  `get_router() -> APIRouter`. 📡 otlp keeps ownership of the router's internals — web does not
+  edit `ingest/otlp.py`. Ticket closes when Phase 6 is green. Nobody but the lead's `cli.py` wires
+  ports.
+
 ## Open questions
+
+- **OQ-02 — OPEN, REAL BUG, owned by 🧱 store.** 📡 otlp found a genuine race in
+  `store/writer.py`: `EventWriter.flush()` holds the lock only around the buffer swap and releases
+  it *before* `_flush_batch` runs `BEGIN TRANSACTION`/`DELETE`/`INSERT`/`COMMIT` on the one shared
+  connection. Six concurrent posts through a single `get_writer()` singleton reliably raise
+  `_duckdb.TransactionException: cannot start a transaction within a transaction`. This violates
+  BL-01's own promise that `get_writer()` is safe to call from the OTLP handler, the JSONL scanner
+  and the LangSmith poller at once. Today only otlp calls it (and has a local `_flush_lock`
+  stopgap); the moment jsonl + langsmith go live this becomes an intermittent, data-losing
+  heisenbug. Dispatched to 🧱 store to fix RED-FIRST (concurrent-flush test must fail first).
+  **📡 otlp handled this exactly right: it mitigated locally, filed the OQ, and refused to edit
+  another pane's file.** That is the discipline working.
+- **OQ-03 — OPEN, accepted risk.** otlp's fixtures were built from the published
+  `code.claude.com/docs/en/monitoring-usage` schema, not captured from live Claude Code traffic
+  (capturing it from inside a build pane is self-referential). This is the spec's named RISK #1.
+  The parser is defensive by design — unmapped attributes land in `payload`, unknown event names
+  are stored as-is — so drift degrades rather than crashes. **GATE mitigation:** the validator's
+  live-telemetry step (one real `claude -p` session against `bam serve`) doubles as the real-payload
+  diff against these fixtures. If an attribute name differs, it is a one-line fix to
+  `_ATTR_TO_COLUMN` in `ingest/otlp.py`, not a redesign.
 
 - **OQ-01 — ANSWERED (human decision, 2026-07-11).** Raised by ⚙️ jobs: the repo's Stop hook ran
   `uv run pyrefly check` repo-wide with `exit 2`, force-continuing every IDLE pane over OTHER

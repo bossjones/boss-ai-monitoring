@@ -1,0 +1,31 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1783764100000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "compaction"}},
+                {"key": "trigger", "value": {"stringValue": "auto"}},
+                {"key": "success", "value": {"boolValue": true}},
+                {"key": "duration_ms", "value": {"intValue": "2100"}},
+                {"key": "pre_tokens", "value": {"intValue": "182000"}},
+                {"key": "post_tokens", "value": {"intValue": "41000"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

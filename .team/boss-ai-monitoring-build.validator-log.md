@@ -1,0 +1,270 @@
+# Validator Log — boss-ai-monitoring-build
+
+Owned exclusively by 🔍 validator. Independent re-verification, raw output only.
+
+---
+
+## VALIDATOR TASK 1 — 🧱 store Phase 2 independent verification
+
+Claimed: `TASK-DONE: store | golden-fixture verified, just check green | tests+30 red-first-Y`
+
+### 1. `rtk proxy just check` — raw tail
+
+```
+uv run ruff check .
+All checks passed!
+uv run ruff format --check .
+40 files already formatted
+uv run pyrefly check
+ INFO Checking project configured at `/Users/bossjones/dev/bossjones/boss-ai-monitoring/pyproject.toml`
+ INFO 0 errors (1 warning not shown)
+uv run codespell
+uv run pytest -q
+........................................................................ [ 59%]
+.................................................                        [100%]
+=============================== warnings summary ===============================
+tests/unit/web/test_app.py::TestOverviewRoute::test_renders_full_page_on_normal_request
+  .../fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+121 passed, 1 warning in 0.93s
+```
+
+Exit 0. pyrefly: **0 errors** (confirmed line: `INFO 0 errors (1 warning not shown)`).
+
+**No papering-over found:**
+- `grep -rn "type: ignore\|type:ignore\|pyrefly: ignore\|pyrefly:ignore\|# noqa" src/boss_ai_monitoring/store/ src/boss_ai_monitoring/web/` → **zero hits**.
+- No pyrefly baseline/suppression file anywhere in repo (`find . -iname "*pyrefly*"` outside `.venv`/`.git` → nothing).
+- `pyproject.toml` `[tool.pyrefly]` excludes only `.venv/**` and `notebooks/**` — store/web not excluded.
+- `[tool.ruff] extend-exclude` = `.claude, logs, specs, notebooks` (pre-existing scaffold entries) — store/web not excluded.
+- `[tool.codespell] skip` includes `web/static` (vendored htmx JS, expected) but not `store/` or `web/queries.py`/`web/app.py`.
+
+**How the 9 real duckdb `.fetchone()` Optional-subscript errors were actually fixed** (read `store/writer.py`):
+- `_count_events`: `row = conn.execute(...).fetchone(); assert row is not None; return row[0]` — a real narrowing assert, not a suppression.
+- `get_cursor`: `result = conn.execute(...).fetchone(); return result[0] if result else None` — a real None-check, not a suppression.
+
+Legitimate fixes, not shortcuts.
+
+### 2. `rtk proxy uv run pytest tests/unit/store -q` — raw
+
+```
+..............................                                           [100%]
+30 passed in 0.41s
+```
+
+Matches claimed `tests+30`.
+
+### 3. RED-FIRST PROOF
+
+**writer.py — gutted `flush()` to `return 0` (no-op):**
+
+```
+..................FFFF.FFFF..F                                           [100%]
+9 failed, 21 passed in 0.38s
+```
+
+Failed: `test_write_auto_flushes_at_batch_size`, `test_flush_interval_zero_flushes_on_every_write`,
+`test_context_manager_flushes_on_exit`, `test_flush_returns_rows_written`,
+`test_flush_is_idempotent_across_flushes_on_event_id`,
+`test_within_batch_duplicate_event_id_counts_once`, `test_write_persists_all_fields_correctly`,
+`test_write_handles_missing_optional_fields`, `test_connect_read_only_cannot_write`.
+
+Restored `writer.py` from a pre-mutation scratchpad backup; `diff` against backup = empty
+(byte-identical restore).
+
+**views.sql — gutted `v_costs_daily` to `WHERE FALSE` (always empty):**
+
+```
+F                                                                        [100%]
+1 failed, 9 deselected in 0.06s
+```
+
+`test_v_costs_daily_groups_by_day_and_excludes_matched_jsonl` failed:
+`assert [] == [(date(2026,1,1), 4.0, 2), (date(2026,1,2), 4.2, 2)]`.
+
+This same fixture doubles as G6 proof (see item 4 below) — restored `views.sql` from backup,
+`diff` = empty.
+
+**Residue check after both restores:**
+
+```
+$ git status --short
+ M .claude/settings.json
+ M .team/boss-ai-monitoring-build.board.md
+```
+
+Only pre-existing lead-owned modifications remain — no store/web residue. Re-ran `rtk proxy just
+check` after restore: green again, 121 passed, 0 pyrefly errors (pasted above is the post-restore
+run).
+
+### 4. BL-01 surface + G6 cost-exclusion proof
+
+`store/writer.py` implements exactly the published surface: `EventWriter` with
+`write`/`write_many`/`flush`/`close`/`get_cursor`/`set_cursor`, `get_writer()`,
+`connect_read_only()`. `store/schema.py` implements `ensure_schema()` and `load_views()`.
+`store/views.sql` defines all six required views (`grep -n "CREATE OR REPLACE VIEW"
+views.sql`): `v_cost_events` (helper, not in BL-01 but not disallowed), `v_sessions`, `v_tasks`,
+`v_costs_daily`, `v_tool_stats`, `v_attribution`, `v_five_metrics`.
+
+G6 proof via the red-first fixture in item 3 above (real query, not read-SQL-and-trust): inserted
+`d2a` (otlp, `request_id=rq-day2`, cost 4.0), `d2a-jsonl-dup` (jsonl, same `request_id=rq-day2`,
+cost 3.9), `d2b-jsonl-solo` (jsonl, `request_id=rq-day2b`, cost 0.2, no otlp match). Expected
+day2 total = 4.0 + 0.2 = **4.2**, NOT 4.0+3.9+0.2=8.1. Against the real (non-gutted)
+`v_costs_daily`, `uv run pytest tests/unit/store/test_views.py -q -k costs_daily` passes,
+confirming the jsonl row with a matching otel cost for the same `(session_id, request_id)` is
+excluded and the jsonl-solo row (no otel match) is kept.
+
+### VERDICT
+
+All four checks pass. Store's TASK-DONE claim is verified independently, not taken on word.
+
+TASK-DONE: validator | store Phase 2 independently verified — just check green (0 pyrefly errors, no suppression), 30/30 store tests pass, red-first confirmed on writer.flush() (9 fail) and v_costs_daily (1 fail incl. G6 proof), BL-01 surface complete, files restored clean | store-verified-Y red-first-Y
+
+---
+
+## VALIDATOR TASK 2 — 📡 otlp Phase 3 independent verification
+
+Claimed: tree green at 172 tests when lead last ran it.
+
+### 1. `rtk proxy uv run pytest tests/unit/ingest/test_otlp.py -q` and `rtk proxy just check` — raw
+
+```
+$ rtk proxy uv run pytest tests/unit/ingest/test_otlp.py -q
+........................                                                 [100%]
+24 passed, 1 warning in 0.74s
+```
+
+```
+$ rtk proxy just check
+uv run ruff check .          -> All checks passed!
+uv run ruff format --check . -> 47 files already formatted
+uv run pyrefly check         -> INFO 0 errors (1 warning not shown)
+uv run codespell             -> (clean)
+uv run pytest -q             -> 172 passed, 1 warning in 7.67s
+```
+
+Matches claimed 172. (A later re-run mid-session briefly showed a `just check` lint failure —
+`F821 Undefined name 'threading'` in `tests/unit/store/test_writer.py` — this was 🧱 store
+mid-writing a NEW concurrent-flush test live during my run (OQ-02 fix), caught in a half-saved
+state; NOT otlp residue — proven below. A follow-up run once store's edit landed was green again
+at 173 passed (one more test, store's new concurrency test).)
+
+### 2. RED-FIRST PROOF
+
+Backed up `src/boss_ai_monitoring/ingest/otlp.py` to scratchpad. Gutted the `/v1/logs` handler to
+a no-op (`return JSONResponse({})` with the `_write_and_flush(...)` call removed).
+
+```
+$ rtk proxy uv run pytest tests/unit/ingest/test_otlp.py -q
+.......FFFFFFFFFF.F.F...                                                 [100%]
+12 failed, 12 passed, 1 warning in 0.72s
+```
+
+Failed (12): test_api_request_fixture_lands_authoritative_columns,
+test_tool_result_fixture_lands_success_and_tool_name,
+test_tool_decision_fixture_lands_decision_and_source_in_payload,
+test_api_error_fixture_lands_request_id_and_error_details,
+test_compaction_fixture_lands_success_bool_and_token_counts_in_payload,
+test_missing_optional_attributes_do_not_crash, test_unknown_event_type_stored_raw_not_dropped,
+test_batched_multi_record_payload_writes_every_record,
+test_replaying_the_same_batch_creates_no_duplicate_rows,
+test_malformed_json_returns_400_without_crashing_the_writer,
+test_gzip_content_encoding_accepted, test_concurrent_posts_are_serialized_without_data_loss.
+(Failures were `events` table not existing / assertion mismatches — the gutted handler wrote
+nothing, so `ensure_schema`/writer never even created the table.)
+
+Restored `otlp.py` from the scratchpad backup: `diff` against backup = **empty (byte-identical)**.
+
+```
+$ git status --short
+ M .claude/settings.json
+ M .team/boss-ai-monitoring-build.board.md
+ M .team/boss-ai-monitoring-build.open-questions.md
+ M pyproject.toml
+ M tests/unit/store/test_writer.py   <- 🧱 store's own concurrent edit, not mine
+?? .team/boss-ai-monitoring-build.validator-log.md
+?? src/boss_ai_monitoring/ingest/{jsonl,langsmith_poll,otlp}.py   <- untracked, unowned by me, unmodified by my probe
+?? tests/fixtures/...
+?? tests/unit/ingest/...
+```
+
+No otlp.py residue. Re-ran `rtk proxy just check` after store's concurrent edit settled: green,
+173 passed, 0 pyrefly errors.
+
+### 3. SPEC EDGE CASES — exercised independently (own script, not otlp's test names)
+
+Wrote a standalone probe script (scratchpad) that builds a bare `FastAPI()` + `get_router()`,
+mirroring exactly how `web/app.py` mounts it, and queries the DuckDB file directly after each
+call — not inferred from response codes alone.
+
+```
+$ rtk proxy uv run python <scratchpad>/validator_otlp_edge_cases.py
+gzip_accepted: (200, 1)
+oversized_rejected: (413, False)
+malformed_then_valid: (400, 200, 1)
+unknown_event_type: (200, 'totally_new_event_xyz', 'surprise')
+concurrent_posts: ({200}, 6, 6)
+idempotency: (200, 1, 200, 1, 0)
+request_id_populated: req_01H8X2ZQK3M4N5P6Q7R8S9T0U1
+```
+
+- **gzip**: `Content-Encoding: gzip` body decompressed and written — 1 row landed.
+- **oversized**: `otlp.ingest.otlp_max_body_bytes=64`, real fixture posted → 413, and the DB file
+  was **never even created** (`db_path.exists() == False`) — rejected before any write attempt.
+- **malformed → 400 without crash**: garbage body → 400; immediately followed by a valid post on
+  the SAME client/app → 200, 1 row — app survived the malformed post, not just returned an error.
+- **unknown event type stored raw**: a fabricated `event.name = "totally_new_event_xyz"` with a
+  novel attribute `weird_future_attr` → row's `event_type` is the literal unknown string (not
+  dropped, not coerced to "unknown"), and `payload->>'weird_future_attr' == 'surprise'`.
+- **concurrent posts safe**: 6 distinct fixtures × 3 repeats = 18 concurrent POSTs across 8
+  threads → all 18 returned 200, and the DB ended with exactly 6 rows (one per unique
+  `event_id`) — proves both thread-safety (no crash/exception under concurrency) AND idempotent
+  dedup under concurrent load simultaneously.
+- **idempotency**: same `api_request.json` export posted twice sequentially → row count after
+  first post = 1, row count after second post = 1, delta = **0 new rows** — confirmed by direct
+  DB query, not inferred from status code.
+- **request_id populated**: `api_request` fixture lands with
+  `request_id = "req_01H8X2ZQK3M4N5P6Q7R8S9T0U1"` (non-null) — the (session_id, request_id) G6
+  dedupe key is actually populated, not silently null.
+
+### 4. request_id on api_request events
+
+Confirmed directly above (`request_id_populated` result) — non-null, matches fixture's
+`req_01H8X2ZQK3M4N5P6Q7R8S9T0U1`. G6 dedupe key is populated.
+
+### 5. `get_router()` contract + no port wiring
+
+```
+$ grep -n "def get_router" src/boss_ai_monitoring/ingest/otlp.py
+286:def get_router() -> APIRouter:
+
+$ grep -n "uvicorn\|:8000\|:4318\|\.run(\|Server(" src/boss_ai_monitoring/ingest/otlp.py
+(no output — clean)
+
+$ grep -n "4318\|8000" src/boss_ai_monitoring/cli.py
+4:mounted) served on TWO uvicorn binds -- dashboard (:8000) and OTLP (:4318) -- as two Server
+110:    serve = subcommands.add_parser("serve", help="serve the dashboard (:8000) and OTLP (:4318)")
+```
+
+`get_router() -> APIRouter` confirmed (also covered by
+`TestRouterContract::test_get_router_returns_an_api_router`, itself re-verified passing in item
+1). Zero port/uvicorn references inside `otlp.py`; both binds are exclusively `cli.py`'s
+responsibility, per BL-02/shared.md serving model.
+
+### OQ-02 concurrency note (context, not verified further — no loan ticket)
+
+Observed live: `otlp.py` carries a local `_flush_lock` (module-level `threading.Lock`) around
+`write_many()` + `flush()` as a stopgap for the `EventWriter.flush()` race (DB round-trip runs
+outside store's internal lock). During this run I directly observed 🧱 store actively adding
+`test_concurrent_flush_through_singleton_has_no_exceptions_or_data_loss` to
+`tests/unit/store/test_writer.py` (caught it in a half-written state, `threading` import landed
+after first use — transient, self-resolved, not a real bug). This is store's fix in progress, not
+otlp's to resolve — no action taken, no loan ticket claimed.
+
+### VERDICT
+
+All five checks pass. otlp's implicit "tree green at 172" claim is verified independently: tests
+match, red-first proven by gutting the handler (12/24 failed), every spec edge case exercised
+with real DB-query evidence (not response-code inference), request_id populated, router contract
+and port-ownership boundary both intact. Files restored byte-identical, no residue.
+
+TASK-DONE: validator | otlp Phase 3 independently verified — 172/172 (now 173 w/ store's concurrent addition) green, red-first confirmed (12/24 fail on gutted handler), all 7 spec edge cases proven by direct DB query incl. gzip/oversized/malformed-recovery/unknown-type-raw/concurrent-safety/idempotency/request_id, router contract + port-ownership boundary intact | otlp-verified-Y red-first-Y

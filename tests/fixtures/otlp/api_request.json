@@ -1,0 +1,41 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}},
+          {"key": "user.account_uuid", "value": {"stringValue": "acct-0f1e2d3c"}},
+          {"key": "terminal.type", "value": {"stringValue": "iTerm.app"}},
+          {"key": "service.name", "value": {"stringValue": "claude-code"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1783764000000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "api_request"}},
+                {"key": "event.timestamp", "value": {"stringValue": "2026-07-11T10:00:00Z"}},
+                {"key": "prompt.id", "value": {"stringValue": "prompt-7f3c1a2b"}},
+                {"key": "model", "value": {"stringValue": "claude-sonnet-5"}},
+                {"key": "cost_usd", "value": {"doubleValue": 0.0421}},
+                {"key": "duration_ms", "value": {"intValue": "3542"}},
+                {"key": "input_tokens", "value": {"intValue": "1820"}},
+                {"key": "output_tokens", "value": {"intValue": "412"}},
+                {"key": "cache_read_tokens", "value": {"intValue": "900"}},
+                {"key": "cache_creation_tokens", "value": {"intValue": "0"}},
+                {"key": "request_id", "value": {"stringValue": "req_01H8X2ZQK3M4N5P6Q7R8S9T0U1"}},
+                {"key": "speed", "value": {"stringValue": "normal"}},
+                {"key": "query_source", "value": {"stringValue": "main"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ connection helper.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -194,3 +195,56 @@ def test_connect_read_only_cannot_write(db_path: Path, make_event: MakeEvent) ->
             )
     finally:
         conn.close()
+
+
+def test_concurrent_flush_through_singleton_has_no_exceptions_or_data_loss(
+    settings: Any,
+) -> None:
+    """OQ-02: get_writer()'s singleton must be safe for concurrent callers (otlp/jsonl/langsmith
+    sharing one connection). flush() must serialize the WHOLE DB round-trip, not just the buffer
+    swap — otherwise two threads can both pass the swap and race BEGIN TRANSACTION on the one
+    shared connection.
+    """
+    writer = get_writer(settings)
+    n_threads = 8
+    events_per_thread = 25
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker(thread_id: int) -> None:
+        try:
+            for i in range(events_per_thread):
+                writer.write(
+                    {
+                        "event_id": f"race-{thread_id}-{i}",
+                        "ts": datetime.now(UTC),
+                        "source": "otlp",
+                        "event_type": "api_request",
+                    }
+                )
+                writer.flush()
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    writer.flush()
+    writer.close()
+
+    assert errors == [], f"concurrent flush raised: {errors!r}"
+
+    conn = connect_read_only(settings.store.db_path)
+    try:
+        total = _scalar(conn, "SELECT count(*) FROM events")
+        distinct = _scalar(conn, "SELECT count(DISTINCT event_id) FROM events")
+    finally:
+        conn.close()
+
+    expected = n_threads * events_per_thread
+    assert total == expected
+    assert distinct == expected

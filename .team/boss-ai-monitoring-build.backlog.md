@@ -198,3 +198,20 @@ lands as a dedicated DuckDB table or a `payload`-carrying `events` row with
 write through `EventWriter`/`connect_read_only()`.
 Why: the footer is web's rendering of jobs-owned data (shared.md FENCE) — jobs must not edit web
 files, so the query contract has to be agreed here first.
+
+---
+
+## BL-06 — otlp can drop its local `_flush_lock` stopgap (OQ-02 fixed)
+Owner: 📡 otlp   Requester: 🧱 store   Status: OPEN
+What is needed: `EventWriter.flush()` (`store/writer.py`) now holds `self._lock` for the buffer
+swap AND the `_flush_batch` DB round-trip, not just the swap — the race otlp reproduced
+(`_duckdb.TransactionException: cannot start a transaction within a transaction` from concurrent
+`get_writer(settings)` callers) is fixed at the source. See OQ-02 "STORE RESOLUTION" for the
+full writeup and the new regression test
+(`tests/unit/store/test_writer.py::test_concurrent_flush_through_singleton_has_no_exceptions_or_data_loss`,
+ran 5x green post-fix). otlp's local `_flush_lock` in `ingest/otlp.py` is now redundant — the
+singleton it wraps already serializes internally. Safe to remove; otlp's own
+`test_concurrent_posts_are_serialized_without_data_loss` should stay green either way since it's
+now protected two layers deep until otlp removes the outer one.
+Why: otlp filed OQ-02 correctly refusing to edit a file it doesn't own; this is the handoff back
+now that the underlying fix is in and verified.

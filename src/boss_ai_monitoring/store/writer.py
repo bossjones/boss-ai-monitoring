@@ -96,14 +96,21 @@ class EventWriter:
         return len(buffered)
 
     def flush(self) -> int:
-        """Force a flush. Returns rows written. ATOMIC and IDEMPOTENT on event_id."""
+        """Force a flush. Returns rows written. ATOMIC and IDEMPOTENT on event_id.
+
+        Holds ``self._lock`` for the buffer swap AND the DB round-trip below (OQ-02): the shared
+        connection's transaction is what needs serializing across concurrent callers of the
+        `get_writer()` singleton (otlp/jsonl/langsmith), not just the list mutation. Releasing
+        the lock before `_flush_batch` let two threads both pass the swap and then race
+        `BEGIN TRANSACTION` on the one connection.
+        """
         with self._lock:
             batch = self._buffer
             self._buffer = []
             self._last_flush = time.monotonic()
-        if not batch:
-            return 0
-        return self._flush_batch(batch)
+            if not batch:
+                return 0
+            return self._flush_batch(batch)
 
     def _flush_batch(self, batch: list[Event]) -> int:
         deduped: dict[Any, tuple[Any, ...]] = {}

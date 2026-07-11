@@ -1,0 +1,33 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1783764002000000000",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "api_error"}},
+                {"key": "prompt.id", "value": {"stringValue": "prompt-7f3c1a2b"}},
+                {"key": "model", "value": {"stringValue": "claude-sonnet-5"}},
+                {"key": "error", "value": {"stringValue": "overloaded_error"}},
+                {"key": "status_code", "value": {"intValue": "529"}},
+                {"key": "duration_ms", "value": {"intValue": "204"}},
+                {"key": "attempt", "value": {"intValue": "2"}},
+                {"key": "request_id", "value": {"stringValue": "req_01H8X2ZQK3M4N5P6Q7R8S9T0U2"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
