@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}boss-ai-monitoring{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="topnav">
+    <span class="topnav__brand">boss-ai-monitoring</span>
+    <nav class="topnav__links">
+      <a href="/" hx-get="/" hx-target="#main" hx-push-url="true">Overview</a>
+      <a href="/live" hx-get="/live" hx-target="#main" hx-push-url="true">Live</a>
+      <a href="/costs" hx-get="/costs" hx-target="#main" hx-push-url="true">Costs</a>
+    </nav>
+  </header>
+  <main id="main">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

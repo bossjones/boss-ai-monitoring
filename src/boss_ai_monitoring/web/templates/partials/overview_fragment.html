@@ -1,0 +1,55 @@
+<section class="panel" id="overview-panel">
+  <h1>Overview</h1>
+
+  <div class="stat-tiles">
+    <div class="stat-tile">
+      <div class="stat-tile__label">Today's cost</div>
+      <div class="stat-tile__value stat-tile__value--cost">${{ "%.2f"|format(overview.today_cost_usd) }}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Tokens in / out</div>
+      <div class="stat-tile__value">{{ overview.tokens_input }} / {{ overview.tokens_output }}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Active sessions</div>
+      <div class="stat-tile__value stat-tile__value--live">{{ overview.active_sessions }}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Tool success rate</div>
+      <div class="stat-tile__value">
+        {% if overview.tool_success_rate is none %}—{% else %}{{ "%.0f"|format(overview.tool_success_rate * 100) }}%{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <h2>Cost — last 14 days</h2>
+  <ul class="sparkline">
+    {% for point in overview.sparkline %}
+    <li class="sparkline__bar" style="--value: {{ point.cost_usd }};" title="{{ point.day }}: ${{ '%.2f'|format(point.cost_usd) }}"></li>
+    {% endfor %}
+  </ul>
+
+  <h2>Recent sessions</h2>
+  {% if overview.recent_sessions %}
+  <table class="data-table">
+    <thead>
+      <tr><th>Session</th><th>Started</th><th>Ended</th><th>Cost</th><th>Events</th></tr>
+    </thead>
+    <tbody>
+      {% for s in overview.recent_sessions %}
+      <tr>
+        <td><a href="/sessions/{{ s.session_id }}" hx-get="/sessions/{{ s.session_id }}" hx-target="#main" hx-push-url="true">{{ s.session_id }}</a></td>
+        <td>{{ s.started_at }}</td>
+        <td>{{ s.ended_at }}</td>
+        <td>${{ '%.2f'|format(s.cost_usd) }}</td>
+        <td>{{ s.event_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No sessions yet. Start a Claude Code session with telemetry enabled to see data here.</p>
+  {% endif %}
+
+  {% include "partials/provenance_footer.html" %}
+</section>

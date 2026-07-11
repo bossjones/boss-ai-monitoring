@@ -1,0 +1,52 @@
+<section class="panel" id="costs-panel">
+  <h1>Costs</h1>
+
+  <h2>Daily</h2>
+  {% if costs.daily %}
+  <table class="data-table">
+    <thead><tr><th>Day</th><th>Cost</th></tr></thead>
+    <tbody>
+      {% for d in costs.daily %}
+      <tr><td>{{ d.day }}</td><td>${{ '%.2f'|format(d.cost_usd) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No cost data yet.</p>
+  {% endif %}
+
+  <h2>Weekly</h2>
+  {% if costs.weekly %}
+  <table class="data-table">
+    <thead><tr><th>Week of</th><th>Cost</th></tr></thead>
+    <tbody>
+      {% for w in costs.weekly %}
+      <tr><td>{{ w.week_start }}</td><td>${{ '%.2f'|format(w.cost_usd) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No cost data yet.</p>
+  {% endif %}
+
+  <h2>Attribution</h2>
+  {% if costs.attribution %}
+  <table class="data-table">
+    <thead><tr><th>Dimension</th><th>Key</th><th>Cost</th><th>Events</th></tr></thead>
+    <tbody>
+      {% for a in costs.attribution %}
+      <tr>
+        <td>{{ a.dimension }}</td>
+        <td>{{ a.key }}</td>
+        <td>${{ '%.2f'|format(a.cost_usd) }}</td>
+        <td>{{ a.event_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No attribution data yet.</p>
+  {% endif %}
+
+  {% include "partials/provenance_footer.html" %}
+</section>

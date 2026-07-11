@@ -1,0 +1,33 @@
+<section class="panel" id="session-detail-panel">
+  <h1>Session {{ session.session_id }}</h1>
+
+  {% if session.tasks %}
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Prompt</th><th>Start</th><th>Duration</th><th>Cost</th><th>Tokens</th>
+        <th>Tools ok/fail</th><th>Agent</th><th>Skill</th><th>LangSmith</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in session.tasks %}
+      <tr>
+        <td>{{ t.prompt_id or "(ungrouped)" }}</td>
+        <td>{{ t.start_ts }}</td>
+        <td>{{ t.duration_ms }} ms</td>
+        <td>${{ '%.2f'|format(t.cost_usd) }}</td>
+        <td>{{ t.tokens_input }} / {{ t.tokens_output }}</td>
+        <td>{{ t.tool_calls_ok }} / {{ t.tool_calls_fail }}</td>
+        <td>{{ t.agent_name or "—" }}</td>
+        <td>{{ t.skill_name or "—" }}</td>
+        <td>{% if t.langsmith_url %}<a href="{{ t.langsmith_url }}">trace</a>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No tasks recorded for this session.</p>
+  {% endif %}
+
+  {% include "partials/provenance_footer.html" %}
+</section>

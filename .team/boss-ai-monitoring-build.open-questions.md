@@ -21,7 +21,7 @@ Two RISKs the spec names in advance — an OQ here is expected, not a defect:
 ---
 
 ## OQ-01 — Stop hook blocks session end on repo-wide pyrefly, not pane-scoped
-Status: NEEDS-HUMAN
+Status: ANSWERED — human decision, relayed by the orchestrator. See LEAD TRIAGE at the end of this block.
 Spec: tooling/harness — `uv run pyrefly check --baseline pyrefly-baseline.json src tests tools
 .claude/status_lines/status_line_v10.py` runs as a Stop hook with `exit 2` on any error.
 What I tried: confirmed my own scope (`src/boss_ai_monitoring/jobs/**`,
@@ -39,6 +39,37 @@ GREEN — the baseline file may need lead/human review to see if it should exclu
 pane-in-flight paths during a multi-pane run, or the hook should scope to changed files only.
 Cost of guessing wrong: low if I just wait; high if this is meant to signal "something is
 actually broken" and gets silently ignored because every pane sees the same noise.
+
+### LEAD TRIAGE (2026-07-11) — ANSWERED. ⚙️ jobs was right to file this; it was a real hazard.
+
+The failure mode ⚙️ jobs spotted is worse than an annoyance: a repo-wide Stop hook that
+force-continues an IDLE pane on OTHER panes' work-in-progress type errors is a direct threat to
+exclusive file ownership — a pane that cannot stop starts "helpfully" editing files it does not own.
+
+RESOLUTION (human-authorized, orchestrator-executed): the Stop hook is NEUTRALIZED for the
+duration of this run. The orchestrator removed ONLY `.hooks.Stop` from `.claude/settings.json`;
+every other hook is untouched; the verbatim original is backed up and WILL be restored before GATE.
+`.claude/settings.json` is ORCHESTRATOR-OWNED — no pane, including the lead, edits it.
+
+THE DEFINITION OF DONE IS UNCHANGED. pyrefly is still fully enforced inside `just check` and inside
+`.github/workflows/ci.yml`, and GATE still requires a green `just check`. Nothing was relaxed; the
+gate simply moved back to where it belongs — the gate — instead of firing at every pane's turn end.
+
+THE ERRORS ARE REAL AND ARE STILL OWNED. Lead independently reproduced them with
+`rtk proxy uv run pyrefly check` (not the baseline invocation, so counts differ slightly). Two
+classes, both owner-fixable, neither of which anyone else may touch:
+
+- **🧱 store** — `duckdb`'s `.fetchone()` is typed `Optional[tuple]` and is being subscripted
+  directly. 2 in `src/boss_ai_monitoring/store/writer.py` (117, 122) + 7 in
+  `tests/unit/store/test_writer.py` (30, 44, 147, 148, 149, 150, 177). Fix: a None guard or an
+  `assert row is not None` before indexing — not a `# type: ignore`.
+- **🖥 web** — same `.fetchone()` pattern in `tests/unit/web/test_queries.py`, plus
+  `tests/unit/web/{test_app,test_queries}.py` importing a bare `conftest` module
+  (`Cannot find module 'conftest'`) — import the fixtures through pytest, not by importing conftest.
+
+Both are part of reaching each pane's own GREEN. Dispatched to store and web on 2026-07-11.
+
+⚙️ jobs: you are unblocked and were never the cause. Stand by for your Wave-3 dispatch.
 
 ---
 (end of current questions)

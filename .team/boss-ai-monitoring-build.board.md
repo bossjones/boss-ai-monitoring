@@ -116,7 +116,25 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 - The pre_tool_use hook blocks Bash containing `rm `, `--rm`, and the env-file token — so the
   sample env file can only be touched with the Read/Edit/Write tools, never via shell.
 
+## Open questions
+
+- **OQ-01 — ANSWERED (human decision, 2026-07-11).** Raised by ⚙️ jobs: the repo's Stop hook ran
+  `uv run pyrefly check` repo-wide with `exit 2`, force-continuing every IDLE pane over OTHER
+  panes' work-in-progress type errors. That is a direct threat to exclusive file ownership — a
+  pane that cannot stop starts editing files it does not own. **Resolution:** the human authorized
+  the orchestrator to NEUTRALIZE the Stop hook for the run (only `.hooks.Stop` removed from
+  `.claude/settings.json`; all other hooks untouched; verbatim original backed up).
+  **The definition of done is UNCHANGED** — pyrefly is still fully enforced inside `just check` and
+  `.github/workflows/ci.yml`, and GATE still requires a green `just check`. The 13 errors are REAL
+  and remain owned by their panes (9 → 🧱 store, 4 → 🖥 web; dispatched). Full triage in
+  `.open-questions.md`. Good catch by ⚙️ jobs — this was a hazard, not noise.
+
 ## Deferred
 
+- **PENDING RESTORE: `.claude/settings.json` Stop hook.** Owner: **🤖 orchestrator** (NOT the lead,
+  NOT any pane — nobody else edits that file). The Stop hook was removed for the duration of this
+  run per OQ-01 and MUST be restored from the backup **before GATE**. ✅ validator: confirm the
+  restore happened as part of the GATE checklist — a run that ends with the human's hook still
+  missing is a failed run, no matter how green the tests are.
 - **CI has never run on GitHub.** `.github/workflows/ci.yml` mirrors `just check` exactly and is
   validated BY CONSTRUCTION this run; no push happens. The human's first push is its first real run.

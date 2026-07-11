@@ -1,0 +1,194 @@
+/*
+ * Design tokens: "signal on slate" — see docs/design-tokens.md for the full contract this
+ * stylesheet implements. Phase 7 (agent frontend-improvement loop) iterates on this file directly.
+ */
+
+:root {
+  --bam-ink: #1c2733;
+  --bam-surface: #f4f6f8;
+  --bam-surface-raised: #ffffff;
+  --bam-border: #d5dce1;
+  --bam-text: var(--bam-ink);
+  --bam-text-muted: #5b6b78;
+
+  --bam-teal: #0e7c7b;
+  --bam-amber: #b57614;
+  --bam-coral: #c0504d;
+
+  --bam-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --bam-font-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+
+  --bam-radius: 6px;
+  --bam-space: 1rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bam-ink: #e6ecf1;
+    --bam-surface: #141b22;
+    --bam-surface-raised: #1c2733;
+    --bam-border: #2c3a47;
+    --bam-text: var(--bam-ink);
+    --bam-text-muted: #93a3b0;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bam-surface);
+  color: var(--bam-text);
+  font-family: var(--bam-font-sans);
+  line-height: 1.5;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem var(--bam-space);
+  background: var(--bam-surface-raised);
+  border-bottom: 1px solid var(--bam-border);
+}
+
+.topnav__brand {
+  font-weight: 600;
+  font-family: var(--bam-font-mono);
+}
+
+.topnav__links a {
+  margin-left: var(--bam-space);
+  color: var(--bam-text-muted);
+  text-decoration: none;
+}
+
+.topnav__links a:hover {
+  color: var(--bam-teal);
+}
+
+main#main {
+  padding: var(--bam-space);
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+.panel h1 {
+  margin-top: 0;
+}
+
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--bam-space);
+  margin-bottom: var(--bam-space);
+}
+
+.stat-tile {
+  background: var(--bam-surface-raised);
+  border: 1px solid var(--bam-border);
+  border-radius: var(--bam-radius);
+  padding: var(--bam-space);
+}
+
+.stat-tile__label {
+  font-size: 0.8rem;
+  color: var(--bam-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.stat-tile__value {
+  font-family: var(--bam-font-mono);
+  font-size: 1.5rem;
+  margin-top: 0.25rem;
+}
+
+.stat-tile__value--cost {
+  color: var(--bam-amber);
+}
+
+.stat-tile__value--live {
+  color: var(--bam-teal);
+}
+
+.sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 3rem;
+  list-style: none;
+  margin: 0 0 var(--bam-space) 0;
+  padding: 0;
+}
+
+.sparkline__bar {
+  flex: 1;
+  background: var(--bam-teal);
+  height: calc(max(var(--value), 0.02) * 3rem);
+  border-radius: 2px 2px 0 0;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--bam-font-mono);
+  font-size: 0.9rem;
+  margin-bottom: var(--bam-space);
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--bam-border);
+}
+
+.data-table a {
+  color: var(--bam-teal);
+}
+
+.active-session-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: var(--bam-space);
+  margin-bottom: var(--bam-space);
+}
+
+.active-session-card {
+  background: var(--bam-surface-raised);
+  border: 1px solid var(--bam-teal);
+  border-radius: var(--bam-radius);
+  padding: 0.75rem;
+  font-family: var(--bam-font-mono);
+}
+
+.empty-state {
+  color: var(--bam-text-muted);
+  font-style: italic;
+}
+
+.provenance-footer {
+  margin-top: 2rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--bam-border);
+  font-size: 0.75rem;
+  color: var(--bam-text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.provenance-footer__drift--ok {
+  color: var(--bam-teal);
+}
+
+.provenance-footer__drift--stale {
+  color: var(--bam-coral);
+}
+
+.provenance-footer__drift--unknown {
+  color: var(--bam-text-muted);
+}
