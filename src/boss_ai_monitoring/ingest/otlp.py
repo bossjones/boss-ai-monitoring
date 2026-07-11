@@ -12,7 +12,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -267,20 +266,9 @@ async def _read_json_body(request: Request, max_bytes: int) -> Any:
         raise HTTPException(status_code=400, detail=f"invalid JSON body: {exc}") from exc
 
 
-# `EventWriter.flush()` only holds its lock around swapping the buffer, not around the
-# BEGIN/DELETE/INSERT/COMMIT it then runs (store/writer.py) -- two threads calling write_many()
-# then flush() on the same singleton (get_writer) can both reach `BEGIN TRANSACTION` on the one
-# shared connection at once and blow up with "cannot start a transaction within a transaction".
-# This lock serializes *this router's* writes so concurrent POSTs never trigger that race; it does
-# not protect against a concurrent jsonl/langsmith flush on the same writer (see OQ filed against
-# store for a proper fix inside EventWriter itself).
-_flush_lock = threading.Lock()
-
-
 def _write_and_flush(writer: EventWriter, events: list[Event]) -> None:
-    with _flush_lock:
-        writer.write_many(events)
-        writer.flush()
+    writer.write_many(events)
+    writer.flush()
 
 
 def get_router() -> APIRouter:
