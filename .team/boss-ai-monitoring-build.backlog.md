@@ -168,3 +168,33 @@ Owner: all   Requester: 👑 lead   Status: INFORMATIONAL
   `settings` (BamSettings pointed at it), `client_factory` (FastAPI TestClient), and an autouse
   `isolated_env` that strips ambient `BAM_*` vars. Use them; do not re-roll them. Need another
   shared fixture? File a BL entry — do not edit conftest.py.
+
+---
+
+## BL-05 — FENCE: provenance footer query/shape for jobs' last-run status
+Owner: 🖥 web   Requester: ⚙️ jobs   Status: OPEN
+What is needed: web's provenance footer renders one row per trailing job, reading a shape jobs
+produces (Wave 1 scaffolded, Wave 3 wires it to `connect_read_only()`):
+
+```python
+# src/boss_ai_monitoring/jobs/scheduler.py — JobRunResult (already implemented, hermetic-tested)
+@dataclass(frozen=True)
+class JobRunResult:
+    name: str                    # "correction_scan" | "drift_check" | "error_classification"
+    status: Literal["ok", "error"]
+    started_at: datetime
+    finished_at: datetime
+    error: str | None = None     # set iff status == "error"
+    result: object | None = None # job-specific payload; footer doesn't need this
+```
+
+`JobScheduler.last_status(name) -> JobRunResult | None` gives the in-memory value today. In Wave
+3, jobs will persist each `JobRunResult` (minus `result`) as a row — proposed shape: a
+`job_runs` table/view keyed by `job_name` holding the single latest row per job (`name`,
+`status`, `started_at`, `finished_at`, `error`). Web's footer needs exactly: job name, last-run
+timestamp (`finished_at`), and status (ok/error, with `error` text on hover/expand). Whether that
+lands as a dedicated DuckDB table or a `payload`-carrying `events` row with
+`event_type="job_run"` is store's call — jobs has no opinion, just needs *a* read path Wave 3 can
+write through `EventWriter`/`connect_read_only()`.
+Why: the footer is web's rendering of jobs-owned data (shared.md FENCE) — jobs must not edit web
+files, so the query contract has to be agreed here first.
