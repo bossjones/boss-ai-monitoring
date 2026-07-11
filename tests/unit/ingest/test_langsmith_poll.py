@@ -18,7 +18,7 @@ import httpx
 import pytest
 from langsmith import AsyncClient
 
-from boss_ai_monitoring.ingest.langsmith_poll import PollResult, poll_once
+from boss_ai_monitoring.ingest.langsmith_poll import PollResult, poll_once, run_forever
 from boss_ai_monitoring.store.writer import EventWriter
 
 PROJECT = "cc-project"
@@ -402,3 +402,54 @@ def test_poll_result_defaults() -> None:
     assert result.events_written == 0
     assert result.unmatched_runs == 0
     assert result.detail is None
+
+
+# ---------------------------------------------------------------------------
+# run_forever: the polling loop wrapper
+# ---------------------------------------------------------------------------
+
+
+async def test_run_forever_polls_once_per_iteration(
+    db_path: Path,
+    respx_mock: Any,
+    mock_langsmith_project: Callable[..., str],
+    make_langsmith_run: Callable[..., dict[str, Any]],
+    mock_langsmith_runs_pages: Callable[..., None],
+) -> None:
+    mock_langsmith_project(respx_mock, project_name=PROJECT)
+    run = make_langsmith_run(start_time=datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC))
+    mock_langsmith_runs_pages(respx_mock, [[run]])
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        client = _client()
+        await run_forever(
+            PROJECT, writer, interval_s=60, iterations=2, client=client, sleep=fake_sleep
+        )
+        writer.flush()
+
+    # 2 iterations, 1 sleep between them — the loop never sleeps after the final pass.
+    assert sleeps == [60]
+    rows = _peek_rows(db_path, where="source = 'langsmith'")
+    assert len(rows) == 1  # the single poll pass (first iteration) already ingested the run
+
+
+async def test_run_forever_survives_a_disabled_pass(db_path: Path) -> None:
+    """No API key -> poll_once returns status=disabled, and the loop keeps ticking, not crashing."""
+    calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        client = _client(api_key=None)
+        await run_forever(
+            PROJECT, writer, interval_s=1, iterations=3, client=client, sleep=fake_sleep
+        )
+        await client.aclose()
+
+    assert calls == [1, 1]

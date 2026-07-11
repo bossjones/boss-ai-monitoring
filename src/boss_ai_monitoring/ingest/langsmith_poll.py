@@ -35,9 +35,12 @@ Event = dict[str, Any]
 
 SOURCE = "langsmith"
 
-# The first poll for a project has no cursor yet — backfill from the beginning, same as the JSONL
-# scanner starting a new file at byte 0.
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# The first poll for a project has no cursor yet. Unlike the JSONL scanner (byte offset 0 is
+# cheap), backfilling "since forever" here is not: the API's ~10 req/10s rate limit is scoped to
+# <=7-day windows (shared.md), and an unbounded start_time was observed in manual E2E to trigger
+# sustained 429s against a real project with meaningful history. So the first poll only reaches
+# back 7 days — deep history backfill is a separate concern, not this poller's job.
+_DEFAULT_LOOKBACK = timedelta(days=7)
 
 # Re-request the last minute of the previous window on every poll so a run whose start_time
 # arrives slightly out of order (clock skew between the LangSmith backend and this host) is never
@@ -124,12 +127,18 @@ async def poll_once(
     client: AsyncClient | None = None,
     cursor_key: str | None = None,
     max_retries: int = 5,
+    limit: int = 200,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> PollResult:
     """One poll pass: list runs since the persisted cursor, map to events, advance the cursor.
 
     Never raises for expected failure modes (missing/invalid key, sustained rate limiting) — those
     come back as a ``PollResult`` with ``status`` set accordingly so the caller can surface it.
+
+    ``limit`` caps runs fetched in one pass: the SDK paginates internally, and on a project with
+    heavy concurrent trace volume, unpaginated listing was observed in manual E2E to exhaust the
+    ~10 req/10s budget within a single poll. A bounded pass costs nothing — whatever's left is
+    picked up by the next poll interval via the persisted cursor.
     """
     owns_client = client is None
     client = client or AsyncClient()
@@ -139,7 +148,11 @@ async def poll_once(
 
         key = cursor_key or project_name
         cursor_raw = writer.get_cursor(SOURCE, key)
-        start_time = datetime.fromisoformat(cursor_raw) if cursor_raw else _EPOCH
+        start_time = (
+            datetime.fromisoformat(cursor_raw)
+            if cursor_raw
+            else datetime.now(UTC) - _DEFAULT_LOOKBACK
+        )
 
         runs: list[ls_schemas.Run] = []
         attempt = 0
@@ -150,6 +163,7 @@ async def poll_once(
                     project_name=project_name,
                     start_time=start_time,
                     select=list(_SELECT_FIELDS),
+                    limit=limit,
                 ):
                     runs.append(run)
                 break

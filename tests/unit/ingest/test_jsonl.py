@@ -17,7 +17,7 @@ from typing import Any
 import duckdb
 import pytest
 
-from boss_ai_monitoring.ingest.jsonl import ScanStats, scan_once
+from boss_ai_monitoring.ingest.jsonl import ScanStats, run_forever, scan_once
 from boss_ai_monitoring.store.writer import EventWriter
 
 
@@ -351,3 +351,51 @@ def test_scan_thousands_of_files_stays_under_time_budget(projects_dir: Path, db_
 
     assert stats.files_scanned == n_files
     assert elapsed < 20.0  # generous budget for 3000 tiny files; catches quadratic blowups
+
+
+# ---------------------------------------------------------------------------
+# run_forever: the polling loop wrapper
+# ---------------------------------------------------------------------------
+
+
+async def test_run_forever_scans_once_per_iteration(
+    projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
+) -> None:
+    copy_fixture("completed_session.jsonl", projects_dir / "proj-a")
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        await run_forever(projects_dir, writer, interval_s=15, iterations=2, sleep=fake_sleep)
+        writer.flush()
+
+    # 2 iterations, 1 sleep between them — the loop never sleeps after the final pass.
+    assert sleeps == [15]
+    rows = _peek_rows(db_path, where="source = 'jsonl'")
+    assert rows  # the single scan pass (first iteration) already ingested everything
+
+
+async def test_run_forever_survives_a_failing_pass(
+    tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import boss_ai_monitoring.ingest.jsonl as jsonl_module
+
+    def _boom(_projects_dir: Path, _writer: EventWriter) -> ScanStats:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(jsonl_module, "scan_once", _boom)
+
+    calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        calls.append(seconds)
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        # must not raise despite scan_once always failing
+        await run_forever(
+            tmp_path / "projects", writer, interval_s=1, iterations=3, sleep=fake_sleep
+        )
+
+    assert calls == [1, 1]

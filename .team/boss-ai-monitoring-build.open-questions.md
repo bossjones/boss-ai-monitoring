@@ -207,4 +207,88 @@ scheduler) is deliberately NOT shipped this wave because I cannot honestly claim
 end-to-end until this is resolved — see BL-07 for the composable pieces I did ship.
 
 ---
+
+## OQ-jsonl-01 — JSONL reverse-engineering assumptions (RISK #1), verified against real transcripts
+Status: ANSWERED (self) — defensive-by-design, verified via manual E2E against real data
+Spec: jsonl-langsmith.md Phase 4 ("JSONL format is reverse-engineered" — shared.md RISK #1)
+What I tried: inspected ~10k real lines across `~/.claude/projects/**/*.jsonl` (this machine) before
+writing `ingest/jsonl.py`, specifically hunting for: a `git_sha`-equivalent field (checked
+`gitSha`/`git_sha`/`gitCommit`/`commitSha` at top level) — never observed, in any file; how
+`promptId` is threaded (assistant lines NEVER carry it directly — only `type: "user"` lines do,
+both the initiating prompt and every `tool_result`, and it repeats identically across a whole
+task's user-type lines); the `isCompactSummary: true` marker for compaction boundaries; `tool_use`/
+`tool_result` block shapes for tool_name resolution.
+Why it is stuck: no published schema exists to verify against; Claude Code versions could add/
+rename/remove any of this at any time (the named risk).
+My best guess / what shipped: `git_sha` extraction checks the plausible field names defensively
+and returns `None` when absent (currently always) — a future version emitting one needs zero code
+change here. `prompt_id` is threaded forward per-session (most-recent `promptId` seen on a
+user-type line applies to every line after it until the next one) — verified accurate against real
+multi-turn sessions where the same `promptId` reappears on every tool_result within one task.
+`tool_decision` has no JSONL structural equivalent (that's OTel/hook-only) so `jsonl.py` does not
+emit it — confirmed in scope by the dispatch's own phrasing ("assistant/user/tool entries").
+Real-data verification (manual E2E, `~/.claude/projects`, 1944 files): 107,590 events ingested
+zero errors/crashes (68,652 api_request / 34,621 tool_result / 4,316 user_prompt / 1 compaction);
+re-scan correctly ingested ONLY the delta from still-growing sessions (133 new events across the
+scan's own 146s window — i.e. sessions that grew *while the first scan was running*, which is
+exactly the gap-fill behavior working, not a bug).
+Cost of guessing wrong: low — every parse path is defensive (unmapped fields land in `payload`,
+malformed lines skip-and-log per line, never crash the scan), so a wrong assumption degrades to
+"less accurate grouping," never data loss or a crash.
+
+## OQ-jsonl-02 — LangSmith thread_id<->session_id join (RISK #2): confirms OQ-04, real rate-limit finding
+Status: ANSWERED (self) — join verified against LIVE data; confirms OQ-04's `connect_read_only()`
+finding independently; shipped a real-world rate-limit mitigation
+Spec: jsonl-langsmith.md Phase 5; shared.md RISK #2; OQ-04 (🧱 store, NEEDS-STORE)
+What I tried: `poll_once()` needs the set of locally-known `session_id`s to decide match vs
+unmatched. Calling `connect_read_only(db_path)` while the process's `EventWriter` (from
+`get_writer(settings)`) is also live raised the EXACT same
+`_duckdb.ConnectionException: Can't open a connection to same database file with a different
+configuration than existing connections` that OQ-04 already documents in depth. I did not touch
+`store/writer.py` (not mine) — worked around it locally in `ingest/langsmith_poll.py` by reading
+through the writer's OWN connection (`writer._conn.execute(...)`) instead of opening a second one,
+which is exactly OQ-04's proposed fix option (1) ("readers pull a `.cursor()` off the SAME live
+connection"), just applied ad hoc at the call site rather than inside `connect_read_only()` itself.
+Separately: manual E2E against the REAL LangSmith API (ambient key; verified
+`$CC_LANGSMITH_PROJECT == $LANGSMITH_PROJECT` beforehand) — first attempt (unbounded "since epoch"
+first-poll, no result cap) exhausted all 6 retries (~126s of backoff) and returned
+`status="error"` cleanly (no crash, exactly as designed) instead of ever succeeding. Root cause:
+this project is receiving real trace writes multiple times per SECOND right now (this very
+multi-pane build session is actively tracing to it), and the SDK paginates with one HTTP request
+per page — an unbounded listing over that volume blew the ~10 req/10s budget before my retry loop
+even helped.
+My best guess / what shipped: (a) the first-ever poll for a project now looks back 7 days instead
+of "since 1970" — matches shared.md's own "<=7-day windows" rate-limit guidance; (b) added a
+`limit` param (default 200) threaded into `list_runs(..., limit=...)` to bound requests-per-poll —
+anything left over is picked up by the next poll via the persisted cursor, nothing is lost, just
+spread out. Re-ran with `limit=50`: SUCCESS — 50 real runs ingested, ALL 50 matched an existing
+local `session_id` via `thread_id` (100% match rate on live data, not simulated), and 6 real
+sessions now carry BOTH `source='jsonl'` and `source='langsmith'` rows sharing one `session_id`
+(one of them is this very build session's own session_id) — the Phase 5 E2E acceptance criterion,
+genuinely satisfied against live traffic.
+Cost of guessing wrong on the join itself: low — an unmatched run lands with `session_id = NULL`
+and its `thread_id` preserved verbatim in `payload` (unit-tested), never silently merged; the
+"LangSmith-only" bucket is queryable as `source='langsmith' AND session_id IS NULL` for whoever
+builds that view. Cost of guessing wrong on rate-limit sizing: low — `limit`/lookback are both
+plain keyword args on `poll_once`, one-line tuning if 200/7d ever proves wrong for a given project.
+
+## OQ-jsonl-03 — OQ-04 (`connect_read_only()` vs live writer) is ALREADY breaking `just check` at HEAD
+Status: OPEN — informational, not mine to fix; flagging blast radius for 🧱 store / 🖥 web / lead
+Spec: OQ-04 (still NEEDS-STORE as of this writing)
+What I tried: ran full `just check` after finishing my own ticket (unrelated to my changes — my own
+`src/boss_ai_monitoring/ingest/**` + `tests/unit/ingest/**` are fully green in isolation and in the
+full suite). `just check`'s `test` step currently fails:
+`tests/e2e/test_dashboard.py::test_live_feed_shows_a_posted_otlp_event_via_sse` — same
+`_duckdb.ConnectionException` as OQ-04, raised from `web/app.py:62` (`_poll_events` ->
+`connect_read_only(settings.store.db_path)`) while a writer is live in the same process.
+Reproduced in isolation (single-test run), so it is stable, not test-order flake.
+Why it is stuck: not my file (`web/app.py` is 🖥 web's), and the root-cause fix belongs in
+`store/writer.py` per OQ-04's own analysis — I have nothing further to add technically, just
+confirming OQ-04's predicted blast radius ("`bam serve` will 500/crash the first time a web route
+... tries to read while the OTLP writer has ever been touched") is no longer theoretical.
+My best guess: this blocks GATE (`just check` must be green) until OQ-04 lands, independent of any
+per-pane GREEN.
+Cost of guessing wrong: none — purely a status report, not a design decision.
+
+---
 (end of current questions)
