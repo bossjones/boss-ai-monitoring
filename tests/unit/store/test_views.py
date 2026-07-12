@@ -57,6 +57,8 @@ def test_all_views_handle_empty_db(conn: Any) -> None:
     assert conn.execute("SELECT * FROM v_costs_daily").fetchall() == []
     assert conn.execute("SELECT * FROM v_tool_stats").fetchall() == []
     assert conn.execute("SELECT * FROM v_attribution").fetchall() == []
+    assert conn.execute("SELECT * FROM v_hook_stats").fetchall() == []
+    assert conn.execute("SELECT * FROM v_infra_events").fetchall() == []
 
     five = conn.execute(
         "SELECT task_completion_rate, tool_selection_accuracy, autonomy_score, "
@@ -632,3 +634,177 @@ def test_v_five_metrics_computes_all_five(conn: Any, make_event: MakeEvent) -> N
     assert autonomy_score == pytest.approx(0.5)
     assert recovery_rate == pytest.approx(0.5)
     assert cost_per_task == pytest.approx(3.0)
+
+
+def test_cost_per_successful_task_counts_only_costed_tasks(
+    conn: Any, make_event: MakeEvent
+) -> None:
+    """outstanding.md P1: the denominator must be the numerator's own population.
+
+    Tasks with no cost observation at all (the JSONL backfill) must not dilute the
+    metric: $4.00 over 2 costed tasks is $2.00/task — not 4.0 / (2 + 3) = $0.80.
+    """
+    _insert_events(
+        conn,
+        [
+            # two error-free tasks WITH an OTel cost
+            make_event(
+                "c1",
+                prompt_id="p-c1",
+                session_id="s6",
+                ts=T0,
+                source="otlp",
+                event_type="api_request",
+                request_id="rq-c1",
+                cost_usd=3.0,
+            ),
+            make_event(
+                "c2",
+                prompt_id="p-c2",
+                session_id="s6",
+                ts=T0 + timedelta(minutes=1),
+                source="otlp",
+                event_type="api_request",
+                request_id="rq-c2",
+                cost_usd=1.0,
+            ),
+        ]
+        + [
+            # three error-free JSONL-backfill tasks with NO cost anywhere
+            make_event(
+                f"j{i}",
+                prompt_id=f"p-j{i}",
+                session_id="s7",
+                ts=T0 + timedelta(minutes=2 + i),
+                source="jsonl",
+                event_type="user_prompt",
+                request_id=None,
+                cost_usd=None,
+            )
+            for i in range(3)
+        ],
+    )
+
+    (value,) = conn.execute("SELECT cost_per_successful_task FROM v_five_metrics").fetchone()
+
+    assert value == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# v_hook_stats / v_infra_events (outstanding.md P3 — surface the raw infra events)
+# ---------------------------------------------------------------------------
+
+
+def test_v_hook_stats_aggregates_hook_execution_complete(conn: Any, make_event: MakeEvent) -> None:
+    """The complete event carries its own totals; wire values are JSON *strings* ("456")."""
+    _insert_events(
+        conn,
+        [
+            make_event(
+                "h1",
+                ts=T0,
+                event_type="hook_execution_complete",
+                payload={
+                    "hook_event": "SessionStart",
+                    "hook_name": "SessionStart:startup",
+                    "num_hooks": "3",
+                    "num_success": "3",
+                    "num_blocking": "0",
+                    "num_non_blocking_error": "0",
+                    "total_duration_ms": "456",
+                },
+            ),
+            make_event(
+                "h2",
+                ts=T0 + timedelta(minutes=1),
+                event_type="hook_execution_complete",
+                payload={
+                    "hook_event": "SessionStart",
+                    "hook_name": "SessionStart:startup",
+                    "num_hooks": "3",
+                    "num_success": "2",
+                    "num_blocking": "0",
+                    "num_non_blocking_error": "1",
+                    "total_duration_ms": "144",
+                },
+            ),
+        ],
+    )
+
+    rows = conn.execute(
+        "SELECT hook_event, hook_name, execution_count, hooks_succeeded, hooks_errored, "
+        "avg_duration_ms, last_seen FROM v_hook_stats"
+    ).fetchall()
+
+    assert rows == [
+        (
+            "SessionStart",
+            "SessionStart:startup",
+            2,
+            5,
+            1,
+            pytest.approx(300.0),
+            T0 + timedelta(minutes=1),
+        )
+    ]
+
+
+def test_v_infra_events_extracts_dotted_payload_keys(conn: Any, make_event: MakeEvent) -> None:
+    """Claude Code emits the DOTTED attribute key `plugin.name` — the JSON path must quote it."""
+    _insert_events(
+        conn,
+        [
+            make_event(
+                "i1",
+                ts=T0,
+                event_type="plugin_loaded",
+                payload={"plugin.name": "third-party", "plugin.scope": "user-local"},
+            ),
+            make_event(
+                "i2",
+                ts=T0 + timedelta(minutes=1),
+                event_type="mcp_server_connection",
+                duration_ms=95,
+                payload={
+                    "status": "connected",
+                    "transport_type": "stdio",
+                    "plugin.name": "telegram",
+                },
+            ),
+            make_event(
+                "i3",
+                ts=T0 + timedelta(minutes=2),
+                event_type="hook_registered",
+                payload={
+                    "hook_event": "PreToolUse",
+                    "hook_type": "command",
+                    "hook_source": "userSettings",
+                },
+            ),
+            # observed live 2026-07-12: a NON-plugin MCP connection carries no name attribute
+            # at all — only server_scope. The view must fall back to it, not render NULL.
+            make_event(
+                "i4",
+                ts=T0 + timedelta(minutes=3),
+                event_type="mcp_server_connection",
+                payload={
+                    "status": "connected",
+                    "transport_type": "claudeai-proxy",
+                    "server_scope": "claudeai",
+                    "is_plugin": False,
+                },
+            ),
+        ],
+    )
+
+    rows = conn.execute(
+        "SELECT event_type, name, status, transport_type, hook_source, duration_ms "
+        "FROM v_infra_events ORDER BY ts"
+    ).fetchall()
+
+    assert rows == [
+        ("plugin_loaded", "third-party", None, None, None, None),
+        ("mcp_server_connection", "telegram", "connected", "stdio", None, 95),
+        ("hook_registered", "PreToolUse", None, None, "userSettings", None),
+        ("mcp_server_connection", "claudeai", "connected", "claudeai-proxy", None, None),
+    ]

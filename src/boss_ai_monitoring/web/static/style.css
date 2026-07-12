@@ -203,6 +203,11 @@ main#main {
   color: var(--bam-coral);
 }
 
+/* outstanding.md P1(b): an unconfigured LangSmith poller must be visibly explained. */
+.provenance-footer__langsmith--missing {
+  color: var(--bam-amber);
+}
+
 .provenance-footer__job--ok {
   color: var(--bam-teal);
 }

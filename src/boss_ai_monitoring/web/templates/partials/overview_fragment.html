@@ -51,5 +51,17 @@
   <p class="empty-state">No sessions yet. Start a Claude Code session with telemetry enabled to see data here.</p>
   {% endif %}
 
+  {% if overview.infra and (overview.infra.hook_executions or overview.infra.plugins_loaded or overview.infra.mcp_servers) %}
+  <h2>Infra</h2>
+  <p class="infra-summary">
+    <span class="infra-summary__item">hooks: {{ overview.infra.hook_executions }} runs
+      {%- if overview.infra.hook_errors %} ({{ overview.infra.hook_errors }} errors){% endif %}</span>
+    <span class="infra-summary__item">plugins: {{ overview.infra.plugins_loaded }}</span>
+    {% for s in overview.infra.mcp_servers %}
+    <span class="infra-summary__item infra-summary__mcp--{{ s.status }}">mcp {{ s.name }}: {{ s.status }}</span>
+    {% endfor %}
+  </p>
+  {% endif %}
+
   {% include "partials/provenance_footer.html" %}
 </section>

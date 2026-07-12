@@ -206,10 +206,18 @@ recovery AS (
         (SELECT count(*) FROM recovered_tasks) AS recovered_tasks
 ),
 successful_task_costs AS (
+    -- Denominator scoped to the numerator (specs/outstanding.md P1): a task counts here only
+    -- if at least one cost-bearing event (v_cost_events) exists for its prompt_id. The JSONL
+    -- backfill carries no cost observation at all; counting those tasks divided real OTel
+    -- dollars by the entire transcript history and collapsed the metric toward zero
+    -- ($0.00042 on real data). EXISTS on v_cost_events — not `cost_usd > 0` — so a genuinely
+    -- $0 costed task still counts, and numerator and denominator are the same population by
+    -- construction: denominator = tasks contributing to the numerator.
     SELECT vt.prompt_id, vt.cost_usd
     FROM v_tasks vt
     JOIN task_errors terr ON terr.prompt_id = vt.prompt_id
     WHERE NOT terr.has_error
+      AND EXISTS (SELECT 1 FROM v_cost_events ce WHERE ce.prompt_id = vt.prompt_id)
 )
 SELECT
     CASE WHEN c.total_tasks = 0 THEN NULL
@@ -225,3 +233,55 @@ SELECT
               / (SELECT count(*) FROM successful_task_costs)
     END AS cost_per_successful_task
 FROM completion c, tool_selection ts, autonomy a, recovery r;
+
+-- v_hook_stats: hook executions per (hook_event, hook_name) (outstanding.md P3).
+-- Reads hook_execution_complete ONLY — the complete event carries its own totals
+-- (num_*, total_duration_ms), so no start/complete pairing is needed;
+-- hook_execution_start is deliberately not consumed here.
+-- Wire values arrive as JSON *strings* ("456", "3"), hence TRY_CAST.
+CREATE OR REPLACE VIEW v_hook_stats AS
+SELECT
+    json_extract_string(payload, '$.hook_event') AS hook_event,
+    json_extract_string(payload, '$.hook_name')  AS hook_name,
+    count(*) AS execution_count,
+    coalesce(sum(TRY_CAST(json_extract_string(payload, '$.num_success') AS INTEGER)), 0)
+        AS hooks_succeeded,
+    coalesce(sum(TRY_CAST(json_extract_string(payload, '$.num_blocking') AS INTEGER)
+               + TRY_CAST(json_extract_string(payload, '$.num_non_blocking_error') AS INTEGER)), 0)
+        AS hooks_errored,
+    avg(TRY_CAST(json_extract_string(payload, '$.total_duration_ms') AS DOUBLE))
+        AS avg_duration_ms,
+    max(ts) AS last_seen
+FROM events
+WHERE event_type = 'hook_execution_complete'
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- v_infra_events: hook registrations, plugin loads and MCP connections as one inventory feed
+-- (outstanding.md P3). NOTE the dotted payload key: Claude Code emits the literal attribute
+-- `plugin.name`, so the JSON path must quote it ('$."plugin.name"') — an unquoted dot is a
+-- path separator and the extraction silently NULLs.
+-- assistant_response is intentionally NOT here: no captured fixture pins its shape yet, and it
+-- is per-response chatter, not infra. hook_execution_* is covered by v_hook_stats.
+CREATE OR REPLACE VIEW v_infra_events AS
+SELECT
+    ts,
+    session_id,
+    event_type,
+    CASE event_type
+        WHEN 'plugin_loaded'         THEN json_extract_string(payload, '$."plugin.name"')
+        -- Observed live 2026-07-12: NON-plugin MCP connections carry no name attribute at all
+        -- (only server_scope, e.g. 'claudeai'). Fall back to scope rather than render NULL.
+        WHEN 'mcp_server_connection' THEN coalesce(
+                                              json_extract_string(payload, '$.server_name'),
+                                              json_extract_string(payload, '$."plugin.name"'),
+                                              json_extract_string(payload, '$.server_scope'))
+        WHEN 'hook_registered'       THEN json_extract_string(payload, '$.hook_event')
+    END AS name,
+    json_extract_string(payload, '$.status')         AS status,          -- mcp only
+    json_extract_string(payload, '$.transport_type') AS transport_type,  -- mcp only
+    json_extract_string(payload, '$.hook_source')    AS hook_source,     -- hooks only
+    duration_ms                                                          -- promoted for mcp
+FROM events
+WHERE event_type IN ('hook_registered', 'plugin_loaded', 'mcp_server_connection')
+ORDER BY ts DESC;

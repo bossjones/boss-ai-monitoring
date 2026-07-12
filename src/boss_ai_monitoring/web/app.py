@@ -116,6 +116,10 @@ Connection = Annotated[duckdb.DuckDBPyConnection | None, Depends(get_connection)
 def create_app(settings: BamSettings) -> FastAPI:
     app = FastAPI(title="boss-ai-monitoring")
     app.state.settings = settings
+    # outstanding.md P1(b): the strict BAM_INGEST__LANGSMITH_PROJECT key is the only thing that
+    # enables the poller, so the dashboard must say so when it is missing — every panel's
+    # provenance footer gets this flag and renders a badge when False.
+    langsmith_configured = bool(settings.ingest.langsmith_project)
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
 
     # otlp-mount
@@ -128,7 +132,9 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def overview(request: Request, conn: Connection) -> HTMLResponse:
-        data = queries.get_overview(conn, now=datetime.now(UTC))
+        data = queries.get_overview(
+            conn, now=datetime.now(UTC), langsmith_configured=langsmith_configured
+        )
         template = (
             "partials/overview_fragment.html" if _is_fragment_request(request) else "overview.html"
         )
@@ -138,12 +144,16 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/api/overview")
     def overview_json(conn: Connection) -> JSONResponse:
-        data = queries.get_overview(conn, now=datetime.now(UTC))
+        data = queries.get_overview(
+            conn, now=datetime.now(UTC), langsmith_configured=langsmith_configured
+        )
         return JSONResponse(jsonable_encoder(data))
 
     @app.get("/live", response_class=HTMLResponse)
     def live(request: Request, conn: Connection) -> HTMLResponse:
-        data = queries.get_live(conn, now=datetime.now(UTC))
+        data = queries.get_live(
+            conn, now=datetime.now(UTC), langsmith_configured=langsmith_configured
+        )
         template = "partials/live_fragment.html" if _is_fragment_request(request) else "live.html"
         return _TEMPLATES.TemplateResponse(
             request, template, {"live": data, "provenance": data.provenance}
@@ -151,12 +161,16 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/api/live")
     def live_json(conn: Connection) -> JSONResponse:
-        data = queries.get_live(conn, now=datetime.now(UTC))
+        data = queries.get_live(
+            conn, now=datetime.now(UTC), langsmith_configured=langsmith_configured
+        )
         return JSONResponse(jsonable_encoder(data))
 
     @app.get("/sessions/{session_id}", response_class=HTMLResponse)
     def session_detail(request: Request, session_id: str, conn: Connection) -> HTMLResponse:
-        data = queries.get_session_detail(conn, session_id)
+        data = queries.get_session_detail(
+            conn, session_id, langsmith_configured=langsmith_configured
+        )
         if data is None:
             raise HTTPException(status_code=404, detail=f"unknown session: {session_id}")
         template = (
@@ -170,14 +184,16 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/api/sessions/{session_id}")
     def session_detail_json(session_id: str, conn: Connection) -> JSONResponse:
-        data = queries.get_session_detail(conn, session_id)
+        data = queries.get_session_detail(
+            conn, session_id, langsmith_configured=langsmith_configured
+        )
         if data is None:
             raise HTTPException(status_code=404, detail=f"unknown session: {session_id}")
         return JSONResponse(jsonable_encoder(data))
 
     @app.get("/costs", response_class=HTMLResponse)
     def costs(request: Request, conn: Connection) -> HTMLResponse:
-        data = queries.get_costs(conn)
+        data = queries.get_costs(conn, langsmith_configured=langsmith_configured)
         template = "partials/costs_fragment.html" if _is_fragment_request(request) else "costs.html"
         return _TEMPLATES.TemplateResponse(
             request, template, {"costs": data, "provenance": data.provenance}
@@ -185,7 +201,7 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/api/costs")
     def costs_json(conn: Connection) -> JSONResponse:
-        data = queries.get_costs(conn)
+        data = queries.get_costs(conn, langsmith_configured=langsmith_configured)
         return JSONResponse(jsonable_encoder(data))
 
     @app.get("/api/events/stream")

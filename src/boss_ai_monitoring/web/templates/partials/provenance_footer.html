@@ -9,6 +9,12 @@
   <span class="provenance-footer__drift provenance-footer__drift--{{ provenance.drift_status }}">
     drift: {{ provenance.drift_status }}
   </span>
+  {% if not provenance.langsmith_configured %}
+  {# outstanding.md P1(b): a silently-down poller looked like a broken feature. Say why. #}
+  <span class="provenance-footer__langsmith provenance-footer__langsmith--missing">
+    langsmith: not configured &mdash; set BAM_INGEST__LANGSMITH_PROJECT
+  </span>
+  {% endif %}
   {% for j in provenance.job_statuses %}
   <span class="provenance-footer__job provenance-footer__job--{{ j.status }}">
     {{ j.name }}: {{ j.status }} ({{ j.last_run_at }})

@@ -55,6 +55,9 @@ class ProvenanceFooter:
     # ⚙️ jobs owns the drift-check query; "unknown" until that lands (BL-05 sibling item).
     drift_status: str
     job_statuses: list[JobStatus]
+    # outstanding.md P1(b): distinguishes "LangSmith not configured" from "configured but idle".
+    # Trailing + defaulted so the frozen dataclass stays constructible at every existing site.
+    langsmith_configured: bool = True
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,22 @@ class SessionSummary:
 
 
 @dataclass(frozen=True)
+class McpServer:
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class InfraSummary:
+    """outstanding.md P3: hook/plugin/MCP telemetry, read via v_hook_stats / v_infra_events."""
+
+    hook_executions: int
+    hook_errors: int
+    plugins_loaded: int
+    mcp_servers: list[McpServer]
+
+
+@dataclass(frozen=True)
 class OverviewData:
     today_cost_usd: float
     tokens_input: int
@@ -90,6 +109,8 @@ class OverviewData:
     sparkline: list[DailyCost]
     recent_sessions: list[SessionSummary]
     provenance: ProvenanceFooter
+    # Trailing + defaulted so existing constructor call sites stay valid (frozen dataclass).
+    infra: InfraSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -172,10 +193,19 @@ class CostsData:
     provenance: ProvenanceFooter
 
 
-def get_provenance_footer(conn: duckdb.DuckDBPyConnection | None) -> ProvenanceFooter:
+def get_provenance_footer(
+    conn: duckdb.DuckDBPyConnection | None, *, langsmith_configured: bool
+) -> ProvenanceFooter:
+    # `langsmith_configured` is a REQUIRED keyword on purpose: the footer is the one place the
+    # dashboard can explain an absent source, so no caller gets to forget to say (P1(b)).
     if conn is None:
         empty_sources = [SourceFreshness(source=s, last_seen=None, event_count=0) for s in SOURCES]
-        return ProvenanceFooter(sources=empty_sources, drift_status="unknown", job_statuses=[])
+        return ProvenanceFooter(
+            sources=empty_sources,
+            drift_status="unknown",
+            job_statuses=[],
+            langsmith_configured=langsmith_configured,
+        )
 
     rows = conn.execute("SELECT source, MAX(ts), COUNT(*) FROM events GROUP BY source").fetchall()
     by_source = {r[0]: (r[1], r[2]) for r in rows}
@@ -226,10 +256,57 @@ def get_provenance_footer(conn: duckdb.DuckDBPyConnection | None) -> ProvenanceF
         else:
             drift_status = "ok"
 
-    return ProvenanceFooter(sources=sources, drift_status=drift_status, job_statuses=job_statuses)
+    return ProvenanceFooter(
+        sources=sources,
+        drift_status=drift_status,
+        job_statuses=job_statuses,
+        langsmith_configured=langsmith_configured,
+    )
 
 
-def get_overview(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> OverviewData:
+def get_infra_summary(conn: duckdb.DuckDBPyConnection | None) -> InfraSummary:
+    """Hook/plugin/MCP telemetry rollup for the overview panel (outstanding.md P3)."""
+    if conn is None:
+        return InfraSummary(hook_executions=0, hook_errors=0, plugins_loaded=0, mcp_servers=[])
+
+    hook_row = conn.execute(
+        "SELECT coalesce(sum(execution_count), 0), coalesce(sum(hooks_errored), 0) "
+        "FROM v_hook_stats"
+    ).fetchone()
+    assert hook_row is not None
+    hook_executions, hook_errors = int(hook_row[0]), int(hook_row[1])
+
+    plugin_row = conn.execute(
+        "SELECT count(*) FROM v_infra_events WHERE event_type = 'plugin_loaded'"
+    ).fetchone()
+    assert plugin_row is not None
+    plugins_loaded = int(plugin_row[0])
+
+    mcp_rows = conn.execute(
+        """
+        SELECT name, status
+        FROM v_infra_events
+        WHERE event_type = 'mcp_server_connection' AND name IS NOT NULL
+        QUALIFY row_number() OVER (PARTITION BY name ORDER BY ts DESC) = 1
+        ORDER BY name
+        """
+    ).fetchall()
+    mcp_servers = [McpServer(name=r[0], status=r[1] or "unknown") for r in mcp_rows]
+
+    return InfraSummary(
+        hook_executions=hook_executions,
+        hook_errors=hook_errors,
+        plugins_loaded=plugins_loaded,
+        mcp_servers=mcp_servers,
+    )
+
+
+def get_overview(
+    conn: duckdb.DuckDBPyConnection | None,
+    *,
+    now: datetime,
+    langsmith_configured: bool = True,
+) -> OverviewData:
     if conn is None:
         return OverviewData(
             today_cost_usd=0.0,
@@ -244,7 +321,8 @@ def get_overview(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> Ov
                 for i in range(_SPARKLINE_DAYS - 1, -1, -1)
             ],
             recent_sessions=[],
-            provenance=get_provenance_footer(conn),
+            provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
+            infra=get_infra_summary(conn),
         )
 
     today = now.date()
@@ -321,14 +399,22 @@ def get_overview(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> Ov
         tool_success_rate=tool_success_rate,
         sparkline=sparkline,
         recent_sessions=recent_sessions,
-        provenance=get_provenance_footer(conn),
+        provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
+        infra=get_infra_summary(conn),
     )
 
 
-def get_live(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> LiveData:
+def get_live(
+    conn: duckdb.DuckDBPyConnection | None,
+    *,
+    now: datetime,
+    langsmith_configured: bool = True,
+) -> LiveData:
     if conn is None:
         return LiveData(
-            recent_events=[], active_sessions=[], provenance=get_provenance_footer(conn)
+            recent_events=[],
+            active_sessions=[],
+            provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
         )
 
     event_rows = conn.execute(
@@ -377,12 +463,15 @@ def get_live(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> LiveDa
     return LiveData(
         recent_events=recent_events,
         active_sessions=active_sessions,
-        provenance=get_provenance_footer(conn),
+        provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
     )
 
 
 def get_session_detail(
-    conn: duckdb.DuckDBPyConnection | None, session_id: str
+    conn: duckdb.DuckDBPyConnection | None,
+    session_id: str,
+    *,
+    langsmith_configured: bool = True,
 ) -> SessionDetail | None:
     if conn is None:
         return None
@@ -478,7 +567,11 @@ def get_session_detail(
         )
         tasks.sort(key=lambda t: t.start_ts)
 
-    return SessionDetail(session_id=session_id, tasks=tasks, provenance=get_provenance_footer(conn))
+    return SessionDetail(
+        session_id=session_id,
+        tasks=tasks,
+        provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
+    )
 
 
 def get_five_metrics(conn: duckdb.DuckDBPyConnection | None) -> FiveMetrics | None:
@@ -497,14 +590,16 @@ def get_five_metrics(conn: duckdb.DuckDBPyConnection | None) -> FiveMetrics | No
     return FiveMetrics(*row)
 
 
-def get_costs(conn: duckdb.DuckDBPyConnection | None) -> CostsData:
+def get_costs(
+    conn: duckdb.DuckDBPyConnection | None, *, langsmith_configured: bool = True
+) -> CostsData:
     if conn is None:
         return CostsData(
             daily=[],
             weekly=[],
             attribution=[],
             five_metrics=None,
-            provenance=get_provenance_footer(conn),
+            provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
         )
 
     daily_rows = conn.execute("SELECT day, cost_usd FROM v_costs_daily ORDER BY day").fetchall()
@@ -557,5 +652,5 @@ def get_costs(conn: duckdb.DuckDBPyConnection | None) -> CostsData:
         weekly=weekly,
         attribution=attribution,
         five_metrics=get_five_metrics(conn),
-        provenance=get_provenance_footer(conn),
+        provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
     )
