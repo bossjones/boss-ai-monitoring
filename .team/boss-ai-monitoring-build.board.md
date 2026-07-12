@@ -27,7 +27,19 @@ Committed `b4a47a2`. Gate: `just check` green, pyrefly 0 errors, **173 tests**.
 | 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🟢 DONE (`ad25e17`) — LIVE LangSmith read-back: 50 runs, 100% session match. Confirmed OQ-04 |
 | 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🟢 DONE (tests+47, red-first-Y) — LT-01 closed |
 | ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🟢 DONE — Phase 8 (`61ede57`, tests+50) + Phase 9 (docker, marimo) |
-| ✅ validator | validator-log.md, GATE checklist | GATE | 🔵 verified store; now auditing otlp |
+| ✅ validator | validator-log.md, GATE checklist | GATE | 🔵 running the 8-point GATE. Verified: store, otlp, OQ-02 fix, jsonl |
+
+**Independent verifications on record** (raw output in `.validator-log.md` — none of these are a
+pane's self-report):
+- 🧱 store Phase 2 + the OQ-02 concurrency fix (red-first reproduced 5/5; idempotency proven under
+  cross-thread collisions).
+- 📡 otlp Phase 3 (gutted handler -> 12/24 fail; every edge case proven by direct DB query, not
+  response-code inference; `request_id` confirmed populated).
+- 📜 jsonl Phases 4+5 (red-first on `parse_line` 9/16 and `poll_once` 11/15; all four transcript
+  shapes; malformed-line skip-and-log; cursor delta + truncation safety; **G6 dedupe proven through
+  the real views against a golden fixture — cost came back 5.75, not 10.6, so the JSONL estimate is
+  genuinely excluded when an OTel cost exists**; live LangSmith cross-check matched the claimed
+  50 runs / 100% across two independent sources).
 
 **Also open:** 🧱 store is fixing OQ-02 (the writer race) — see Open questions below. It is GREEN
 otherwise; the race is a defect against its own published contract, not a regression of Phase 2.
