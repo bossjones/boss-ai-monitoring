@@ -228,3 +228,44 @@ class TestServeStartsBackgroundWork:
 
         assert cli.main(["serve"]) == 0
         assert served == ["uvicorn:8000", "uvicorn:4318"]
+
+
+class TestJobResultsArePersisted:
+    """The trailing jobs must RECORD their runs, not just execute them.
+
+    `_run_jobs` built the scheduler without `persist=`, so the jobs ran and their results went
+    nowhere: no `job_run` events, so `web/queries.py`'s drift lookup found nothing and the
+    provenance footer read `drift: unknown` forever. `jobs/live.py::persist_job_status` already
+    existed for exactly this — its own docstring spells out the wiring.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_scheduler_pass_writes_a_job_run_event(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import duckdb
+
+        from boss_ai_monitoring.config import load_settings
+        from boss_ai_monitoring.store.writer import get_writer
+
+        db = tmp_path / "bam.duckdb"
+        monkeypatch.setenv("BAM_STORE__DB_PATH", str(db))
+        settings = load_settings()
+
+        scheduler = cli._build_job_scheduler(settings)
+        await scheduler.run_once()
+        get_writer(settings).close()  # flush + release the lock so we can read it back
+
+        conn = duckdb.connect(str(db), read_only=True)
+        try:
+            names = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT json_extract_string(payload, '$.name') FROM events "
+                    "WHERE event_type = 'job_run'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+
+        assert "drift_check" in names, "the drift job ran but its result was never persisted"
