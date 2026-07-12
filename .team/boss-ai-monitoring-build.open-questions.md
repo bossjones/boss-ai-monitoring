@@ -206,6 +206,45 @@ job logic. `build_scheduler(settings)`-style single-call wiring (writer + live c
 scheduler) is deliberately NOT shipped this wave because I cannot honestly claim it works
 end-to-end until this is resolved — see BL-07 for the composable pieces I did ship.
 
+### STORE RESOLUTION (2026-07-11) — FIXED, option (1) as diagnosed
+
+RED-first: added four tests to `tests/unit/store/test_writer.py` —
+`test_connect_read_only_coexists_with_a_live_writer`,
+`test_connect_read_only_sees_only_committed_rows_from_live_writer`,
+`test_concurrent_reads_during_writes_do_not_corrupt_or_block`, and
+`test_connect_read_only_still_works_when_no_writer_is_live`. Temporarily reverted
+`connect_read_only()`/`close()` to the pre-fix shape and confirmed the first three reliably raised
+`ConnectionException: Can't open a connection to same database file with a different
+configuration than existing connections` (the fourth correctly passed either way — it exercises
+the no-writer-live fallback, not this bug).
+
+Fix, exactly jobs' diagnosed option (1): `connect_read_only(db_path)` is now writer-aware — it
+looks up the `get_writer()` singleton registry (`_writers`) for this path; if a writer is live,
+it hands back `.cursor()` off that SAME connection (confirmed via raw duckdb: a cursor sees only
+committed rows via MVCC, is unaffected by the parent's in-flight uncommitted transaction, and
+does NOT hit the config-mismatch check) instead of opening an independent
+`duckdb.connect(read_only=True)`. Falls back to a fresh read-only connect when no writer is live
+for that path (tests, the marimo notebook standalone, store's own golden-fixture tests). One
+wrinkle found during implementation: a `.cursor()` does NOT inherit the parent connection's `SET
+TimeZone='UTC'` — each cursor has its own independent session settings — so `pin_utc()` is now
+called on the returned cursor too, not just on fresh connections. A second wrinkle:
+`get_writer()`'s registry never evicted a closed writer, so a stale entry could hand out a
+cursor on an already-closed connection after `.close()` — fixed by having `EventWriter.close()`
+remove itself from `_writers` under the same lock `connect_read_only()` reads, closing that race
+window too.
+
+Re-ran the four new tests 3x post-fix: green every time. Full store suite (36 tests, including
+the earlier OQ-02 concurrency regression test) green. Repo-wide `rtk proxy just check`: ruff
+check/format, codespell, and the full pytest suite (203 tests) all green; `pyrefly check` scoped
+to `src/boss_ai_monitoring/store` + `tests/unit/store` is 0 errors — the only remaining
+repo-wide `just check` failure is an unrelated, pre-existing type error in
+`src/boss_ai_monitoring/ingest/jsonl.py:103` (not my file, not touched).
+
+Also took BL-08's low-severity `v_attribution` caveat while in this file: `job_run` bookkeeping
+rows (jobs/live.py) were landing in the `(NULL, NULL, NULL)` attribution bucket, inflating its
+`event_count`/`avg_duration_ms`. RED-first test + one-line `WHERE event_type != 'job_run'` fix in
+`store/views.sql`'s `attributed_stats` CTE — see BL-08 for the writeup.
+
 ---
 
 ## OQ-jsonl-01 — JSONL reverse-engineering assumptions (RISK #1), verified against real transcripts
@@ -289,6 +328,32 @@ confirming OQ-04's predicted blast radius ("`bam serve` will 500/crash the first
 My best guess: this blocks GATE (`just check` must be green) until OQ-04 lands, independent of any
 per-pane GREEN.
 Cost of guessing wrong: none — purely a status report, not a design decision.
+
+## OQ-04 web addendum — independent confirmation from the e2e smoke test
+Status: adds to OQ-04 (NEEDS-STORE); not a new question
+Spec: web.md Phase 6 acceptance — Playwright smoke test booting the REAL server.
+What I tried: `tests/e2e/test_dashboard.py` boots `create_app(settings)` via real uvicorn (the
+actual `bam serve` topology, otlp mounted per LT-01), POSTs `tests/fixtures/otlp/api_request.json`
+to `/v1/logs` (creates `get_writer(settings)`'s live singleton), then opens
+`/api/events/stream` — same `_duckdb.ConnectionException` as OQ-04, raised from
+`_poll_events` -> `connect_read_only()` (`web/app.py`). I independently reproduced the raw-duckdb
+repro OQ-04 documents (matching config vs mismatched `read_only=True` after an implicit-config
+write connection) before finding OQ-04 already filed by ⚙️ jobs.
+Why it is stuck: same root cause OQ-04 already diagnosed; `web/app.py` cannot work around it
+without either duplicating store's connection logic or calling `get_writer()` from a read-only
+pane (forbidden — G5, this dispatch's own instruction: "web NEVER opens a DuckDB WRITE
+connection... web is read-only, period").
+My best guess: OQ-04's fix (readers `.cursor()` off the live writer connection when one exists
+in-process) unblocks this identically for web, jobs, and GATE in one change. No web-side
+workaround needed once it lands — `_poll_events`/`get_connection` already call
+`connect_read_only()` exactly per BL-01's contract.
+Cost of guessing wrong: none — this is confirmation, not a new design question.
+
+RESOLVED (web, same day): store landed the `.cursor()`-off-the-live-writer fallback in
+`store/writer.py::connect_read_only`. Removed the `xfail` marker and re-ran
+`tests/e2e/test_dashboard.py` 3x clean (page load -> POST `/v1/logs` -> real SSE push -> browser
+DOM update, against the actual single-process `bam serve` topology) — green every time. OQ-04
+itself stays open for store/jobs to close on their own evidence; this is web's confirmation only.
 
 ---
 (end of current questions)

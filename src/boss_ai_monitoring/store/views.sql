@@ -115,6 +115,9 @@ GROUP BY tool_name
 ORDER BY tool_name;
 
 -- v_attribution: cost + latency per agent_name/skill_name/model (Anthropic per-feature view).
+-- job_run rows (jobs/live.py::persist_job_status) are scheduler bookkeeping with
+-- agent_name/skill_name/model all NULL — excluded so they don't inflate the (NULL, NULL, NULL)
+-- attribution bucket (BL-08).
 CREATE OR REPLACE VIEW v_attribution AS
 WITH attributed_stats AS (
     SELECT
@@ -124,6 +127,7 @@ WITH attributed_stats AS (
         count(*) AS event_count,
         avg(duration_ms) AS avg_duration_ms
     FROM events
+    WHERE event_type != 'job_run'
     GROUP BY agent_name, skill_name, model
 ),
 attributed_costs AS (

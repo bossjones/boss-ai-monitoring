@@ -142,6 +142,13 @@ class EventWriter:
     def close(self) -> None:
         self.flush()
         self._conn.close()
+        # Evict self from the get_writer() registry so a stale, closed connection can't be
+        # handed out by connect_read_only()'s writer-aware cursor() path (OQ-04) — a later
+        # get_writer()/connect_read_only() call for this path opens a fresh one instead.
+        with _writers_lock:
+            stale_keys = [key for key, writer in _writers.items() if writer is self]
+            for key in stale_keys:
+                del _writers[key]
 
     # cursors — the ingest panes' resume points (ingest_cursors table)
     def get_cursor(self, source: str, key: str) -> str | None:
@@ -183,7 +190,26 @@ def get_writer(settings: BamSettings) -> EventWriter:
 
 def connect_read_only(db_path: Path) -> duckdb.DuckDBPyConnection:
     """Everyone READING (web, jobs, the marimo notebook, tests) uses THIS — a read-only
-    connection, so it never fights the single writer."""
+    connection, so it never fights the single writer.
+
+    Writer-aware (OQ-04): DuckDB refuses a second `duckdb.connect(path, read_only=True)` while a
+    non-read-only connection to the same file is already open in-process — exactly the situation
+    `bam serve` is in the moment `get_writer()`'s singleton goes live. When a writer for this path
+    is already live, hand back a `.cursor()` off that SAME connection instead: cursors support
+    concurrent queries via MVCC (see committed rows only, never blocked by or blocking the
+    writer's in-flight transaction) and don't hit the config-mismatch check. Falls back to a
+    fresh read-only connect when no writer is live (tests, the marimo notebook standalone).
+    """
+    key = str(Path(db_path))
+    with _writers_lock:
+        writer = _writers.get(key)
+        if writer is not None:
+            # Hold the lock across the cursor() call too, not just the lookup: close() also
+            # takes _writers_lock to evict itself, so this can't hand out a cursor on a
+            # connection that's mid-close.
+            cursor = writer._conn.cursor()
+            pin_utc(cursor)  # a cursor has its own session settings, not inherited from parent
+            return cursor
     conn = duckdb.connect(str(db_path), read_only=True)
     pin_utc(conn)
     return conn

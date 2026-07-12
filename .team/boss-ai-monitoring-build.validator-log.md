@@ -417,3 +417,203 @@ diff), idempotency and no-loss/no-dup hold under real concurrent + cross-thread-
 BL-07 (⚙️ jobs in-flight lint state) so it isn't confused with this verification.
 
 TASK-DONE: validator | OQ-02 fix independently verified — lock now covers the whole DB transaction (read + diff-confirmed), red-first reproduced 5/5 on the pre-fix code with the exact reported TransactionException, idempotency+no-loss/no-dup proven under concurrent cross-thread collisions via direct DB query, otlp.py content byte-identical (no ownership violation); unrelated jobs-pane lint redness flagged separately as BL-07 | oq02-verified-Y red-first-Y
+
+---
+
+## VALIDATOR TASK 4 — 📜 jsonl Phases 4+5 independent verification
+
+Claimed: DONE, idle, committed `ad25e17`; live LangSmith cross-check of 50 runs, 100% session
+match. SCOPED to `ingest/jsonl.py`, `ingest/langsmith_poll.py`, their two test files only — 🧱
+store is actively editing `store/writer.py` for OQ-04, untouched here.
+
+### 1. `rtk proxy uv run pytest tests/unit/ingest/test_jsonl.py tests/unit/ingest/test_langsmith_poll.py -q` — raw
+
+```
+...............................                                          [100%]
+31 passed in 6.23s
+```
+
+(Full `just check` is currently RED tree-wide from OQ-04 — `tests/e2e/test_dashboard.py` failing
+on `connect_read_only()` vs a live `get_writer()` connection, per the task briefing. Confirmed
+this is NOT jsonl's fault: jsonl's own scoped suite above is 100% green, and OQ-04 is entirely
+inside `store/`, outside my scope here. Not chased further, per instructions.)
+
+### 2. RED-FIRST PROOF
+
+Backed up both `ingest/jsonl.py` and `ingest/langsmith_poll.py` to scratchpad.
+
+**jsonl.py — gutted `parse_line` to `return []` unconditionally (first line of the function body):**
+
+```
+$ rtk proxy uv run pytest tests/unit/ingest/test_jsonl.py -q
+FF..F.FFFFF...F.                                                         [100%]
+9 failed, 7 passed in 5.16s
+```
+
+Failed: test_scan_discovers_files_and_parses_completed_session,
+test_scan_populates_request_id_on_api_request_events, test_second_scan_ingests_only_the_delta,
+test_truncated_file_resets_cursor_safely, test_malformed_line_is_skipped_and_logged,
+test_subagent_sidechain_events_are_captured, test_session_spanning_compaction_emits_compaction_event,
+test_unicode_and_emoji_content_round_trips, test_run_forever_scans_once_per_iteration. All failed
+on `events_written == 0` / empty row sets — exactly what a gutted parser should produce.
+
+**langsmith_poll.py — gutted `poll_once` to `return PollResult(status="ok", ...)` immediately
+(before the API-key check, so no run ever gets fetched or written):**
+
+```
+$ rtk proxy uv run pytest tests/unit/ingest/test_langsmith_poll.py -q
+FFF.FFFFF.FF.F.                                                          [100%]
+11 failed, 4 passed in 0.33s
+```
+
+Failed: test_poll_once_maps_runs_to_events_and_persists_cursor,
+test_poll_once_populates_trace_id_and_run_type_in_payload,
+test_poll_once_follows_pagination_cursors, test_poll_once_retries_after_429_then_succeeds,
+test_poll_once_gives_up_after_max_retries_without_crashing,
+test_poll_once_disables_with_no_api_key_and_makes_no_request,
+test_poll_once_disables_on_invalid_api_key_without_crashing,
+test_unmatched_thread_id_leaves_session_id_null_but_keeps_thread_id_in_payload,
+test_run_with_missing_token_usage_is_still_written,
+test_cursor_overlaps_by_one_minute_and_rerun_is_idempotent,
+test_run_forever_polls_once_per_iteration.
+
+Restored both files from scratchpad backups: `diff` against each backup = **empty**.
+`git status --short src/boss_ai_monitoring/ingest/` → **no output (clean)**. Re-ran the scoped
+suite: green again, 31/31.
+
+### 3. THE FOUR TRANSCRIPT SHAPES — exercised independently (own script)
+
+Wrote a standalone probe that scans all 6 fixtures in `tests/fixtures/jsonl/` (completed,
+still-growing, session-with-subagent, malformed-line, plus compaction + unicode as bonus) through
+the real `scan_once`, then queries the DB directly:
+
+```
+$ rtk proxy uv run python <scratchpad>/validator_jsonl_probe.py
+jsonl: skipping malformed line (99 bytes)
+jsonl: skipping malformed line (313 bytes)
+jsonl: skipping malformed line (344 bytes)
+shapes_files_scanned: 6
+shapes_events_written: 18
+shapes_event_types: ['api_request', 'compaction', 'tool_result', 'user_prompt']
+malformed_fixture_good_lines_landed: ['api_request', 'user_prompt']
+```
+
+All four required shapes present and exercised. `malformed_line.jsonl` has 4 lines: a good
+`user_prompt` line, a truncated/broken JSON line, a blank line, and a good `assistant`-with-usage
+line (→ `api_request`). The scan logged 3 "skipping malformed line" warnings (matching the
+truncated + blank-adjacent lines across the fixture set) and **both good lines from the malformed
+fixture landed** (`['api_request', 'user_prompt']`) — confirms skip-and-log, not crash, and the
+scan continued past the bad line to ingest the rest of the file.
+
+### 4. CURSORS — byte-offset resume, delta-only, truncation-safe
+
+Same probe script, continued:
+
+```
+cursor_first_scan_events: 2
+cursor_rescan_nochange_events: 0
+cursor_rescan_nochange_total_unchanged: True
+cursor_append_scan_events: 1
+cursor_total_after_append: 3
+cursor_no_dup_no_reread: True
+truncation_full_count_before: 4
+truncation_no_crash: True
+truncation_events_on_truncated_pass: 1
+truncation_final_count_after_restore: 4
+```
+
+- First scan of `growing_session.jsonl`: 2 events. Immediate re-scan with **no file change**: 0
+  new events — cursor resumed at EOF, no re-read.
+- Appended `growing_session.append.jsonl`'s bytes onto the live file, re-scanned: exactly 1 new
+  event landed (the delta), total 3 = 2 + 1 — **no duplicates, no re-reads of old bytes**.
+- Truncated `completed_session.jsonl` to 1/3 its size (simulating rotation, landing mid-line): no
+  crash, ingested 1 event from the partial content that survived. Restored full original bytes
+  and rescanned: **no crash**, and final total (4) matches the original full-file count exactly —
+  the size-check (`size < offset -> offset = 0`) reset the cursor safely rather than seeking into
+  garbage, and re-ingesting the same lines from offset 0 was a no-op via `event_id` dedup (not a
+  double-count).
+
+### 5. G6 DEDUPE — proven by direct query against a golden fixture, not by reading SQL
+
+Wrote three rows directly through `EventWriter` for the SAME `(session_id, request_id)`
+scenario: an OTel-sourced authoritative cost row (`cost_usd=5.0`), a JSONL row for the exact same
+`(session_id, request_id)` with its own (different) estimate (`cost_usd=4.85`), and a JSONL-only
+row for a different `request_id` with no OTel match (`cost_usd=0.75`).
+
+```
+$ rtk proxy uv run python <scratchpad>/validator_jsonl_g6_dedupe.py
+v_costs_daily: [(datetime.date(2026, 7, 10), 5.75, 2)]
+v_cost_events (post-G6-filter rows): [('jsonl-solo-1', 'jsonl', 0.75), ('otel-1', 'otlp', 5.0)]
+expected_day_total: 5.75
+actual_day_total: 5.75
+jsonl_dup_excluded: True
+jsonl_dup_event_id_absent_from_cost_events: True
+```
+
+`v_costs_daily` totals **5.75** (5.0 otel + 0.75 jsonl-solo), NOT 5.0+4.85+0.75=10.6 — the jsonl
+row sharing `(session_id, request_id)` with the otel row is excluded entirely (`jsonl-dup-1` is
+absent from `v_cost_events`), while the unmatched jsonl-solo row is correctly kept. Confirms
+jsonl rows carry `request_id` (required for this join to even be possible) and that G6 holds
+end-to-end through the real views, not by inspection.
+
+### 6. READ-ONLY guarantee
+
+```
+$ grep -n "\.open(\|write(\|writelines\|os\.remove\|unlink\|\.write_text\|\.write_bytes" src/boss_ai_monitoring/ingest/jsonl.py
+283:        with path.open(encoding="utf-8", errors="replace") as f:
+```
+
+The only file-open call in `jsonl.py` is `path.open(encoding=..., errors=...)` — no mode
+argument, which defaults to `"r"` (read-only text). No write/unlink/rename calls anywhere in the
+file. `~/.claude/projects` is never written to by this module.
+
+### 7. LIVE LANGSMITH READ-BACK CROSS-CHECK — re-run independently
+
+Presence checks only (G14, no values printed):
+
+```
+LANGSMITH_PROJECT is set (value withheld)
+CC_LANGSMITH_PROJECT is set (value withheld)
+```
+
+```
+$ langsmith run list --project "$LANGSMITH_PROJECT" --limit 10
+[10 real runs listed: Read/Bash/Edit/Write tool traces, real trace/run IDs, real timestamps]
+
+$ langsmith run list --project "$LANGSMITH_PROJECT" --limit 50   (counted rows returned)
+50
+
+$ DB_PATH=$(uv run bam config db-path)
+$ duckdb "$DB_PATH" "SELECT source, count(*) FROM events GROUP BY 1"
+┌───────────┬──────────────┐
+│  source   │ count_star() │
+├───────────┼──────────────┤
+│ langsmith │           50 │
+│ jsonl     │       107590 │
+└───────────┴──────────────┘
+
+$ duckdb "$DB_PATH" "SELECT count(*) FILTER (WHERE session_id IS NOT NULL) AS matched, count(*) FILTER (WHERE session_id IS NULL) AS unmatched, count(*) AS total FROM events WHERE source='langsmith'"
+┌─────────┬───────────┬───────┐
+│ matched │ unmatched │ total │
+├─────────┼───────────┼───────┤
+│      50 │         0 │    50 │
+└─────────┴───────────┴───────┘
+```
+
+LangSmith's own `run list --limit 50` returns exactly 50 runs; the DB independently holds exactly
+50 `source='langsmith'` rows, all 50 with `session_id` populated (0 unmatched) — **matches jsonl's
+claimed 50 runs / 100% session match exactly**, confirmed by two independent live sources, not
+taken on word. (Note: this is the real live `~/.local/share/boss-ai-monitoring/bam.duckdb`, not a
+test fixture — `otlp` shows 0 rows there currently, unrelated to this task.)
+
+### VERDICT
+
+All seven checks pass. jsonl's DONE claim is verified independently: scoped suite green (31/31),
+red-first proven on both `parse_line` (9/16 fail) and `poll_once` (11/15 fail) with byte-identical
+restores, all four transcript shapes exercised with malformed-line skip-and-log proven (not
+crash), cursor resume/delta/truncation-safety proven by direct scan+query sequences, G6 dedupe
+proven end-to-end through the real views against a golden fixture, read-only guarantee confirmed
+by grep, and the live LangSmith cross-check matches jsonl's claimed 50/100% exactly across two
+independent sources.
+
+TASK-DONE: validator | jsonl Phases 4+5 independently verified — 31/31 scoped tests green, red-first proven on parse_line (9/16 fail) and poll_once (11/15 fail), all 4 transcript shapes + malformed-line skip-and-log proven, cursor delta/truncation-safety proven, G6 dedupe proven via golden-fixture query (5.75 not 10.6), read-only confirmed, live LangSmith cross-check matches claimed 50/100% exactly | jsonl-verified-Y red-first-Y

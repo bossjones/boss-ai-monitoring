@@ -248,3 +248,125 @@ def test_concurrent_flush_through_singleton_has_no_exceptions_or_data_loss(
     expected = n_threads * events_per_thread
     assert total == expected
     assert distinct == expected
+
+
+def test_connect_read_only_coexists_with_a_live_writer(
+    settings: Any, make_event: MakeEvent
+) -> None:
+    """OQ-04: DuckDB refuses a second `duckdb.connect(path, read_only=True)` while a live,
+    non-read-only connection to the same file is already open in-process — exactly the situation
+    `bam serve` is in from the moment `get_writer()`'s singleton goes live. connect_read_only()
+    must stay usable anyway.
+    """
+    writer = get_writer(settings)
+    try:
+        writer.write(make_event("live1"))
+        writer.flush()
+
+        reader = connect_read_only(settings.store.db_path)
+        try:
+            assert _scalar(reader, "SELECT count(*) FROM events") == 1
+        finally:
+            reader.close()
+    finally:
+        writer.close()
+
+
+def test_connect_read_only_sees_only_committed_rows_from_live_writer(
+    settings: Any, make_event: MakeEvent
+) -> None:
+    writer = get_writer(settings)
+    try:
+        writer.write(make_event("committed1"))
+        writer.flush()
+
+        reader = connect_read_only(settings.store.db_path)
+        try:
+            assert _scalar(reader, "SELECT count(*) FROM events") == 1
+            # buffered but not yet flushed — must not be visible to the reader
+            writer.write(make_event("buffered_only"))
+            assert _scalar(reader, "SELECT count(*) FROM events") == 1
+            writer.flush()
+            assert _scalar(reader, "SELECT count(*) FROM events") == 2
+        finally:
+            reader.close()
+    finally:
+        writer.close()
+
+
+def test_concurrent_reads_during_writes_do_not_corrupt_or_block(
+    settings: Any,
+) -> None:
+    """Readers via connect_read_only() run concurrently with an actively-flushing writer without
+    raising and without ever observing a partial/torn row count.
+    """
+    writer = get_writer(settings)
+    n_events = 100
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def write_worker() -> None:
+        try:
+            for i in range(n_events):
+                writer.write(
+                    {
+                        "event_id": f"cw-{i}",
+                        "ts": datetime.now(UTC),
+                        "source": "otlp",
+                        "event_type": "api_request",
+                    }
+                )
+                writer.flush()
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+        finally:
+            stop.set()
+
+    def read_worker() -> None:
+        try:
+            while not stop.is_set():
+                reader = connect_read_only(settings.store.db_path)
+                try:
+                    count = _scalar(reader, "SELECT count(*) FROM events")
+                    assert 0 <= count <= n_events
+                finally:
+                    reader.close()
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    writer_thread = threading.Thread(target=write_worker)
+    reader_threads = [threading.Thread(target=read_worker) for _ in range(4)]
+
+    writer_thread.start()
+    for th in reader_threads:
+        th.start()
+    writer_thread.join()
+    for th in reader_threads:
+        th.join()
+
+    writer.close()
+
+    assert errors == [], f"concurrent read/write raised: {errors!r}"
+
+    conn = connect_read_only(settings.store.db_path)
+    try:
+        assert _scalar(conn, "SELECT count(*) FROM events") == n_events
+    finally:
+        conn.close()
+
+
+def test_connect_read_only_still_works_when_no_writer_is_live(
+    db_path: Path, make_event: MakeEvent
+) -> None:
+    with EventWriter(db_path, batch_size=1) as writer:
+        writer.write(make_event("closed1"))
+    # writer is closed and evicted — no live writer for this path anymore
+
+    conn = connect_read_only(db_path)
+    try:
+        assert _scalar(conn, "SELECT count(*) FROM events") == 1
+    finally:
+        conn.close()

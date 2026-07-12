@@ -472,6 +472,46 @@ def test_v_attribution_cost_and_latency_per_agent_skill_model(
     assert group_null[2] == 1
 
 
+def test_v_attribution_excludes_job_run_bookkeeping_rows(conn: Any, make_event: MakeEvent) -> None:
+    """BL-08: jobs' scheduler persists JobRunResult as an events row with event_type='job_run'
+    and agent_name/skill_name/model all NULL (jobs/live.py::persist_job_status). That's scheduler
+    bookkeeping, not a real attribution event — it must not inflate the (NULL, NULL, NULL) bucket
+    or appear in v_attribution at all.
+    """
+    _insert_events(
+        conn,
+        [
+            make_event(
+                "job1",
+                agent_name=None,
+                skill_name=None,
+                model=None,
+                event_type="job_run",
+                source="jobs",
+                cost_usd=None,
+                duration_ms=500,
+            ),
+            make_event(
+                "real1",
+                agent_name="agentC",
+                skill_name="skillC",
+                model="claude-z",
+                event_type="api_request",
+                source="otlp",
+                request_id="rqC1",
+                cost_usd=1.0,
+                duration_ms=100,
+            ),
+        ],
+    )
+
+    rows = conn.execute(
+        "SELECT agent_name, skill_name, model, event_count FROM v_attribution"
+    ).fetchall()
+
+    assert rows == [("agentC", "skillC", "claude-z", 1)]
+
+
 # ---------------------------------------------------------------------------
 # v_five_metrics
 # ---------------------------------------------------------------------------

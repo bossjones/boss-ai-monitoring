@@ -283,3 +283,12 @@ Why: BL-05 asked "what shape should jobs persist" and left it to store/web; web 
 built a concrete, already-working query — this entry records the shape jobs actually shipped
 against it, closes BL-05's open question, and hands web the one piece (`alert_count`) it doesn't
 have yet.
+
+### STORE RESOLUTION (2026-07-11) — the `v_attribution` caveat above is fixed
+
+RED-first: added `tests/unit/store/test_views.py::test_v_attribution_excludes_job_run_bookkeeping_rows`
+(a `job_run` row + a real attributed row; asserted the `(NULL, NULL, NULL)` bucket does not
+appear at all). Confirmed it failed against the pre-fix view — `v_attribution` returned the
+job_run row's `(None, None, None, 1)` bucket alongside the real one. Fix: added
+`WHERE event_type != 'job_run'` to `attributed_stats` in `store/views.sql`, exactly the one-liner
+proposed above. Re-ran: green. Full store suite (36 tests) green.
