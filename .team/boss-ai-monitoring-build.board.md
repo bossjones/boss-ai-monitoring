@@ -9,7 +9,8 @@
 SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE -> DONE
 ```
 
-**Current state: PACKAGE / pre-GATE** (Wave 3 in flight — web Phase 6, jobs Phase 8; jsonl finishing Phase 5)
+**Current state: GATE** — all 9 phases implemented, `just check` green (208 tests, pyrefly 0
+errors), INTEGRATE+PACKAGE committed (`62d5137`). ✅ validator is running the 8-point checklist.
 
 INGEST-FANOUT closed 2026-07-11: 📡 otlp Phase 3 **independently validator-verified** (raw output
 in `.validator-log.md` — red-first proven by gutting the handler, 12/24 failed; all edge cases
@@ -24,8 +25,8 @@ Committed `b4a47a2`. Gate: `just check` green, pyrefly 0 errors, **173 tests**.
 | 🧱 store | schema.py, writer.py, views.sql | 2 | 🟢 GREEN, committed `fa1f7e5` (tests+30, red-first-Y) |
 | 📡 otlp | ingest/otlp.py | 3 | 🟢 DONE — validator-verified; BL-06 stopgap removed (`30cb2b0`). Filed OQ-02 + OQ-03 |
 | 📜 jsonl | ingest/jsonl.py, ingest/langsmith_poll.py | 4+5 | 🟢 DONE (`ad25e17`) — LIVE LangSmith read-back: 50 runs, 100% session match. Confirmed OQ-04 |
-| 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🔵 Wave 3: Phase 6 live wiring (holds LT-01) |
-| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🔵 Phase 8 done (`61ede57`, tests+50); Phase 9 PACKAGE dispatched |
+| 🖥 web | web/**, e2e, docs/AGENT_LOOP.md | 6+7 | 🟢 DONE (tests+47, red-first-Y) — LT-01 closed |
+| ⚙️ jobs | jobs/**, notebook, Dockerfile, compose | 8+9 | 🟢 DONE — Phase 8 (`61ede57`, tests+50) + Phase 9 (docker, marimo) |
 | ✅ validator | validator-log.md, GATE checklist | GATE | 🔵 verified store; now auditing otlp |
 
 **Also open:** 🧱 store is fixing OQ-02 (the writer race) — see Open questions below. It is GREEN
@@ -72,8 +73,8 @@ and checking the tests actually fail. Its verdict lands in `.validator-log.md`.
 | SCAFFOLD baseline | `2994737 feat(scaffold): uv package, config, bam CLI, TDD harness` | ✅ committed |
 | STORE-CORE green | `fa1f7e5 feat(store): DuckDB schema, batched writer, SQL views; web shadow scaffold` | ✅ committed |
 | INGEST-FANOUT green | `b4a47a2 feat(ingest): OTLP receiver, JSONL reader, LangSmith poller; fix writer race` | ✅ committed |
-| INTEGRATE green | — | pending |
-| PACKAGE green | — | pending |
+| INTEGRATE green | `62d5137 feat(web,jobs): live dashboard, agent loop, docker, marimo` | ✅ committed |
+| PACKAGE green | (same commit `62d5137`) | ✅ committed |
 | GATE clean | — | pending |
 
 ## WAVE 0 baseline — `just check`, green (2026-07-11)
@@ -221,7 +222,9 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 
 ## Deferred
 
-- **PENDING RESTORE: `.claude/settings.json` Stop hook.** Owner: **🤖 orchestrator** (NOT the lead,
+- **✅ CLOSED — `.claude/settings.json` Stop hook RESTORED** by the orchestrator to its exact
+  pre-build state (verbatim; `git status` clean; the restored hook runs 0 errors / exit 0). OQ-01
+  is closed, NOT deferred. Original note: Owner was **🤖 orchestrator** (NOT the lead,
   NOT any pane — nobody else edits that file). The Stop hook was removed for the duration of this
   run per OQ-01 and MUST be restored from the backup **before GATE**. ✅ validator: confirm the
   restore happened as part of the GATE checklist — a run that ends with the human's hook still
