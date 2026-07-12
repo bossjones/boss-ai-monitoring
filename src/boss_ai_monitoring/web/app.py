@@ -31,6 +31,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from boss_ai_monitoring.config import BamSettings
 from boss_ai_monitoring.store.writer import connect_read_only
+from boss_ai_monitoring.store.writer import snapshot as snapshot_db_file
 from boss_ai_monitoring.web import queries
 
 _WEB_DIR = Path(__file__).parent
@@ -190,5 +191,29 @@ def create_app(settings: BamSettings) -> FastAPI:
     @app.get("/api/events/stream")
     async def events_stream(request: Request) -> EventSourceResponse:
         return EventSourceResponse(_poll_events(settings, request))
+
+    @app.post("/api/snapshot")
+    def snapshot_db() -> JSONResponse:
+        """Hand out a consistent copy of the DB so it can be read WHILE we are serving.
+
+        DuckDB's file lock is exclusive cross-process (OQ-05), so while this app holds the write
+        connection no outside `duckdb`/marimo process can open the file at all. We hold that
+        connection, so we are the only one who can produce a copy.
+
+        The destination is chosen HERE and never taken from the caller: an endpoint that writes to
+        a caller-supplied path is a file-write primitive, and binding localhost (G10) is not a
+        reason to hand one out.
+        """
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        dest = settings.store.snapshot_dir / f"bam-{stamp}.duckdb"
+
+        written = snapshot_db_file(settings.store.db_path, dest)
+
+        conn = duckdb.connect(str(written), read_only=True)
+        try:
+            row = conn.execute("SELECT count(*) FROM events").fetchone()
+        finally:
+            conn.close()
+        return JSONResponse({"path": str(written), "rows": row[0] if row else 0})
 
     return app

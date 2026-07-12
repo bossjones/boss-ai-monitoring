@@ -139,6 +139,48 @@ class EventWriter:
             raise
         return after - before
 
+    def snapshot_to(self, dest: Path) -> Path:
+        """Write a consistent point-in-time copy of the DB to ``dest``. Returns ``dest``.
+
+        This exists because DuckDB's file lock is exclusive CROSS-process (OQ-05): while `bam
+        serve` holds this write connection, no outside `duckdb`/marimo process can open the file
+        at all — not even read-only. Since we hold the only write connection, we are the only one
+        who can hand out a copy, and `COPY FROM DATABASE` gives a transactionally-consistent one
+        (schema, tables AND views) rather than the torn bytes a plain file copy could produce.
+
+        Runs under ``self._lock`` for the same reason ``flush()`` does (OQ-02): the whole DB
+        round-trip is what needs serializing against concurrent producers, not just a swap.
+        """
+        dest = Path(dest)
+        if dest.exists():
+            raise FileExistsError(f"refusing to overwrite an existing snapshot: {dest}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            # Flush buffered events first, or the snapshot silently omits whatever is still in
+            # memory — a snapshot that quietly loses the newest rows is worse than no snapshot.
+            if self._buffer:
+                batch = self._buffer
+                self._buffer = []
+                self._last_flush = time.monotonic()
+                self._flush_batch(batch)
+
+            source_db = self._conn.execute("SELECT current_database()").fetchone()
+            if source_db is None:  # pragma: no cover - DuckDB always answers this
+                raise RuntimeError("could not resolve the current database name")
+
+            # ATTACH takes no bound parameters (DuckDB parser error at `?`), so the path has to
+            # be a literal — escape any single quote rather than concatenate it in raw.
+            dest_literal = str(dest).replace("'", "''")
+            self._conn.execute(f"ATTACH '{dest_literal}' AS bam_snapshot")
+            try:
+                # Identifiers can't be bound as parameters, and both sides are our own names
+                # (the attach alias is a literal; the source is DuckDB's own current_database()).
+                self._conn.execute(f'COPY FROM DATABASE "{source_db[0]}" TO bam_snapshot')
+            finally:
+                self._conn.execute("DETACH bam_snapshot")
+        return dest
+
     def close(self) -> None:
         self.flush()
         self._conn.close()
@@ -170,6 +212,25 @@ class EventWriter:
 
 _writers: dict[str, EventWriter] = {}
 _writers_lock = threading.Lock()
+
+
+def snapshot(db_path: Path, dest: Path) -> Path:
+    """Consistent copy of the DB at ``db_path``, whether or not the app is running.
+
+    Live writer (``bam serve`` up) -> delegate to it; it owns the only connection that can read
+    the file at all. No live writer (marimo standalone, tests) -> open a short-lived one.
+    """
+    key = str(Path(db_path))
+    with _writers_lock:
+        writer = _writers.get(key)
+    if writer is not None:
+        return writer.snapshot_to(dest)
+
+    standalone = EventWriter(db_path)
+    try:
+        return standalone.snapshot_to(dest)
+    finally:
+        standalone.close()
 
 
 def get_writer(settings: BamSettings) -> EventWriter:

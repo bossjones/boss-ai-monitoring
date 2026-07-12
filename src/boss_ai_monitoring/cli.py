@@ -17,12 +17,15 @@ import importlib
 import logging
 import sys
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
+import httpx
 import uvicorn
 from fastapi import FastAPI
 
 from boss_ai_monitoring import __version__
 from boss_ai_monitoring.config import BamSettings, load_settings
+from boss_ai_monitoring.store.writer import snapshot
 
 log = logging.getLogger("bam")
 
@@ -102,6 +105,33 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_snapshot(_args: argparse.Namespace) -> int:
+    """Print the path to a consistent copy of the DB — readable WHILE `bam serve` runs.
+
+    DuckDB's file lock is exclusive cross-process (OQ-05), so an outside `duckdb`/marimo process
+    cannot open the live DB at all. Ask the running app (it owns the only usable connection); if
+    nothing is listening, do it in-process instead.
+
+    Prints ONLY the path, so it composes:
+        duckdb "$(uv run bam snapshot)" "SELECT source, count(*) FROM events GROUP BY 1"
+    """
+    settings = load_settings()
+    url = f"http://{settings.server.dashboard_bind}:{settings.server.dashboard_port}/api/snapshot"
+
+    try:
+        response = httpx.post(url, timeout=30.0)
+        response.raise_for_status()
+        print(response.json()["path"])
+        return 0
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        log.info("no app listening on %s — snapshotting in-process instead", url)
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    dest = settings.store.snapshot_dir / f"bam-{stamp}.duckdb"
+    print(snapshot(settings.store.db_path, dest))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bam", description=__doc__.splitlines()[0])
     parser.add_argument("--version", action="version", version=f"bam {__version__}")
@@ -119,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="db-path prints the resolved DuckDB path",
     )
     config.set_defaults(func=_cmd_config)
+
+    snap = subcommands.add_parser(
+        "snapshot",
+        help="print the path to a consistent DB copy, readable while `bam serve` is running",
+    )
+    snap.set_defaults(func=_cmd_snapshot)
 
     return parser
 

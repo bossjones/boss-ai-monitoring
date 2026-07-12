@@ -96,3 +96,64 @@ def test_unknown_command_exits_nonzero(capsys: pytest.CaptureFixture[str]) -> No
         cli.main(["bogus"])
 
     assert excinfo.value.code != 0
+
+
+def test_snapshot_prints_a_bare_path_so_it_composes(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`duckdb "$(uv run bam snapshot)" ...` only works if stdout is JUST the path."""
+    monkeypatch.setenv("BAM_STORE__DB_PATH", str(tmp_path / "bam.duckdb"))
+    monkeypatch.setenv("BAM_STORE__SNAPSHOT_DIR", str(tmp_path / "snaps"))
+
+    exit_code = cli.main(["snapshot"])
+
+    printed = capsys.readouterr().out.strip()
+    assert exit_code == 0
+    assert Path(printed).is_absolute()
+    assert Path(printed).exists()
+    assert printed.count("\n") == 0
+
+
+def test_snapshot_falls_back_to_local_when_the_app_is_not_running(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """App down: don't fail, just snapshot in-process. Nothing is listening on the port here."""
+    monkeypatch.setenv("BAM_STORE__DB_PATH", str(tmp_path / "bam.duckdb"))
+    monkeypatch.setenv("BAM_STORE__SNAPSHOT_DIR", str(tmp_path / "snaps"))
+    monkeypatch.setenv("BAM_SERVER__DASHBOARD_PORT", "9")  # discard port, guaranteed refused
+
+    exit_code = cli.main(["snapshot"])
+
+    assert exit_code == 0
+    assert Path(capsys.readouterr().out.strip()).exists()
+
+
+def test_snapshot_asks_the_running_app_when_one_is_up(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """App up: the CLI must delegate to it — the app holds the only usable connection."""
+    served = tmp_path / "from-the-app.duckdb"
+    served.write_text("")
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"path": str(served), "rows": 7}
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    def fake_post(url: str, **_: Any) -> FakeResponse:
+        assert url.endswith("/api/snapshot")
+        return FakeResponse()
+
+    monkeypatch.setenv("BAM_STORE__DB_PATH", str(tmp_path / "bam.duckdb"))
+    monkeypatch.setattr(cli.httpx, "post", fake_post)
+
+    exit_code = cli.main(["snapshot"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == str(served)

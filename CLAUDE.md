@@ -38,8 +38,13 @@ Verification CLIs (installed on this machine):
 
 ```bash
 # ALWAYS the resolved-path form — a bare $BAM_DB_PATH is unset in most shells and silently
-# opens an EMPTY db, which reads as a fake-green result. Stop `bam serve` first (see DuckDB below).
+# opens an EMPTY db, which reads as a fake-green result.
 duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+
+# ...but if `bam serve` is RUNNING and has written anything, that errors on the file lock.
+# Snapshot instead — works while it serves, and composes because it prints only the path:
+duckdb "$(uv run bam snapshot)" "SELECT source, count(*) FROM events GROUP BY 1"
+BAM_STORE__DB_PATH="$(uv run bam snapshot)" uvx marimo edit notebooks/explore.py
 langsmith run list --project "$LANGSMITH_PROJECT"   # LangSmith read-back (auth is ambient via direnv)
 rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output is evidence
 ```
@@ -56,10 +61,12 @@ rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output 
   precedence env (`BAM_` prefix, `__` nesting) > YAML > defaults. No ad-hoc `os.environ` reads.
 - **DuckDB single-writer**: exactly one write connection, owned by `store/writer.py`. Readers use
   `connect_read_only()`, which is writer-aware *in-process*. **Cross-process the file lock is
-  exclusive**: you CANNOT run the `duckdb` CLI or marimo against the DB while `bam serve` holds the
-  write connection (`Can't open a connection to same database file with a different
-  configuration`) — stop the app first. The spec's "readers never fight the writer" claim is only
-  half true; this was proven in OQ-04/OQ-05, do not re-derive it.
+  exclusive**: once the app has actually written (the writer is created LAZILY — an idle `bam
+  serve` holds no lock), an outside `duckdb`/marimo process gets `IO Error: Could not set lock`.
+  The spec's "readers never fight the writer" claim is only half true (OQ-04/OQ-05) — don't
+  re-derive it. **Use `bam snapshot`** instead of stopping the app: it asks the running app for a
+  consistent point-in-time copy (tables AND views, via `COPY FROM DATABASE` on the writer's own
+  connection) and prints just the path, so it composes.
 - **The whole `flush()` DB round-trip is lock-protected**, not just the buffer swap — releasing the
   lock before `BEGIN TRANSACTION` let concurrent producers race the shared connection (OQ-02).
 - **OTLP is http/json only** on :4318 — no gRPC, no otel-collector.
@@ -90,10 +97,12 @@ Observed live on 2026-07-11 during the 7-pane build. Full detail in
   `--model 'opus[1m]'`. Same trap with any unquoted glob (`docker images -q foo*`).
 - **The Claude composer renders ghost hint text** that drifts on its own and looks EXACTLY like a
   stranded missed-enter send. Probe with a real prompt before "fixing" it.
-- **This repo's own `Stop` hook is hostile to multi-pane runs**: repo-wide `pyrefly ... || exit 2`
-  force-continues *idle* panes over *other* panes' WIP errors, pressuring a blocked agent into
-  editing files it does not own. Neutralize `.hooks.Stop` for the run, back it up verbatim, restore
-  before the gate. (`just check` still enforces pyrefly, so nothing escapes.)
+- **The `Stop` hook is session-scoped** (`.claude/hooks/pyrefly_session_scope.py`): it type-checks
+  only the `.py` files *this* session edited, read from its own `transcript_path`. It used to run
+  repo-wide with `exit 2`, which force-continued *idle* panes over *other* panes' WIP errors and
+  pressured them into editing files they don't own (OQ-01). `git diff` scoping would NOT have
+  fixed that — panes share one working tree, so the scope must be per-SESSION. The hook fails
+  open; `just check` / pre-commit / CI still enforce full-tree pyrefly.
 - **The validator must WRITE its log**, not just speak a verdict — a verdict that exists only on a
   scrollable terminal is not evidence. Confirm by artifact (git deltas, file mtimes, exit codes,
   duckdb counts), never by silence or by a Claude Code notification.

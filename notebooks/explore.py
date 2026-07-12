@@ -21,15 +21,24 @@ def _(mo):
         (G5). Reach for this when a dashboard number needs digging into: "why did Tuesday cost
         $9?", a per-session breakdown, the token-class mix, or which tools keep failing.
 
-        **Run this with `bam serve` stopped**, not alongside it: DuckDB takes an OS-level
-        exclusive lock for the duration of any read-write connection, and that lock blocks *every
-        other process's* connection to the same file — including a read-only one — regardless of
-        which process opened it first. That's a DuckDB file-locking property, not a bug in this
-        notebook or in `connect_read_only()`; it's a separate constraint from the in-process
-        conflict tracked at OQ-04 (`.team/*.open-questions.md`), which is about `web`'s and
-        `jobs`' readers sharing `bam serve`'s own OS process, not about a standalone tool like
-        this one. If you need to explore while the app keeps running, work off a copy of the
-        DuckDB file instead.
+        ## If `bam serve` is running, explore a snapshot
+
+        DuckDB takes an OS-level exclusive lock for the duration of any read-write connection, and
+        that lock blocks *every other process's* connection to the same file — including a
+        read-only one (OQ-05). So while the app is up, this notebook cannot open the live DB at
+        all. That's a DuckDB file-locking property, not a bug in `connect_read_only()`.
+
+        The app owns the only usable connection, so ask **it** for a consistent copy:
+
+        ```bash
+        BAM_STORE__DB_PATH="$(uv run bam snapshot)" uvx marimo edit notebooks/explore.py
+        ```
+
+        (`BAM_STORE__DB_PATH`, not `BAM_DB_PATH` — env keys are `BAM_` + the nested section, G4.)
+
+        `bam snapshot` prints the path to a point-in-time copy (schema, tables and views), taken
+        by the running app itself — not a torn file copy. With the app stopped, it snapshots
+        in-process instead, and you can also just point this notebook straight at the live DB.
 
         Run modes: `uvx marimo edit notebooks/explore.py` (interactive, editable) or
         `uvx marimo run notebooks/explore.py` (read-only app view). See

@@ -51,8 +51,11 @@ class StoreSettings(BaseModel):
     db_path: Path = Path("~/.local/share/boss-ai-monitoring/bam.duckdb")
     batch_size: int = 500
     flush_interval_ms: int = 1000
+    # Where `bam snapshot` drops consistent copies for the duckdb CLI / marimo to read while the
+    # app keeps running (OQ-05). The server picks the filename; callers never supply a path.
+    snapshot_dir: Path = Path("~/.local/share/boss-ai-monitoring/snapshots")
 
-    @field_validator("db_path", mode="before")
+    @field_validator("db_path", "snapshot_dir", mode="before")
     @classmethod
     def _absolute(cls, value: Any) -> Any:
         return _as_absolute_path(value)
