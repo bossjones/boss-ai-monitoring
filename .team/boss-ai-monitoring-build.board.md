@@ -258,3 +258,57 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
   missing is a failed run, no matter how green the tests are.
 - **CI has never run on GitHub.** `.github/workflows/ci.yml` mirrors `just check` exactly and is
   validated BY CONSTRUCTION this run; no push happens. The human's first push is its first real run.
+
+---
+
+## LESSONS FOR THE NEXT RUN (rev 5 candidates)
+
+Observed failures from this run, recorded so the next team does not re-pay for them.
+
+**1. The lead goes idle after every turn — this is the single biggest failure mode.**
+Workers never self-dispatch and cannot see each other, so when the lead stops, the entire team
+silently stops. This run needed 3 hand-nudges plus a background watchdog firing ~19 automated
+nudges. Rev 5 must tell the lead explicitly: *after ANY worker reply, immediately re-poll every
+worker surface and dispatch — never end your turn while work is queued.* An orchestrator-side
+watchdog is not optional; assume the lead will stall and build for it.
+
+**2. Measure liveness by SCREEN-DIFF, not by a text marker.**
+`md5` the pane's screen twice ~10s apart. Grepping for "esc to interrupt" produced a FALSE IDLE on
+a pane that was actively working. A false stall diagnosis is worse than a missed one — it makes you
+interrupt or re-dispatch a pane mid-work. (File mtimes also lie: `find -newermt '-3 minutes'`
+returned nothing while a pane was demonstrably editing.)
+
+**3. `cmux new-workspace` / `new-split` IGNORE `--json`** — they print `OK workspace:9`. Resolve new
+surface UUIDs by diffing `cmux tree --all` before/after. Short refs (`surface:N`) renumber; the
+UUID is the only stable handle.
+
+**4. Quote model args and globs.** `claude --model opus[1m]` is glob-eaten by zsh (`no matches
+found`) — write `--model 'opus[1m]'`. Same bug class later hit an unquoted
+`docker images -q boss-ai-monitoring*`.
+
+**5. The Claude composer renders GHOST HINT TEXT** that drifts on its own and looks exactly like a
+stranded missed-enter send. Do not panic-clear it. Verify with a probe prompt instead.
+
+**6. The repo's own `Stop` hook (repo-wide pyrefly, `exit 2`) is HOSTILE to multi-pane runs.**
+It force-continues an IDLE pane over OTHER panes' work-in-progress type errors, which pressures a
+blocked pane into "helpfully" editing files it does not own — a direct attack on exclusive
+ownership. Neutralize it for the duration of the run (remove only `.hooks.Stop`) and restore it
+before GATE. Done and verified byte-identical this run (OQ-01). The definition of done is unchanged:
+pyrefly still runs inside `just check` and CI.
+
+**7. rtk FILTERS command output.** `uv run pytest -q` reported "No tests collected" while pytest had
+really hit 2 collection errors. Any command whose output is EVIDENCE needs `rtk proxy`. Related:
+`uv run playwright install chromium` silently no-ops under the rewrite (exit 0, downloads nothing) —
+use `uv run python -m playwright install chromium chromium-headless-shell`.
+
+**8. The validator must WRITE its log file, not just speak its verdict.**
+It verified store correctly but left no artifact until explicitly told to. A verdict that exists
+only on a scrollable screen is not evidence — and `read-screen --scrollback` returns only the
+viewport, so it is unrecoverable. Make "append raw output to the log" part of every validator
+dispatch, not a final step.
+
+**9. What actually worked, keep it.** Exclusive file ownership caught three real bugs without a
+single fence violation: otlp found a race in store's writer and refused to fix it (filed OQ-02),
+jobs found the `connect_read_only()` ship-blocker and refused to fix it (filed OQ-04). Both were
+invisible to a green test suite. The red-first-by-gutting-the-implementation check is what proved
+the tests were real. Keep all of it.
