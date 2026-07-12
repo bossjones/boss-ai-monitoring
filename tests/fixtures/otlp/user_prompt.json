@@ -1,0 +1,30 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1783763999000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "user_prompt"}},
+                {"key": "prompt.id", "value": {"stringValue": "prompt-7f3c1a2b"}},
+                {"key": "prompt_length", "value": {"intValue": "146"}},
+                {"key": "command_name", "value": {"stringValue": ""}},
+                {"key": "command_source", "value": {"stringValue": ""}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

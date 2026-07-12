@@ -1,0 +1,82 @@
+<section class="panel" id="costs-panel">
+  <h1>Costs</h1>
+
+  <h2>Daily</h2>
+  {% if costs.daily %}
+  <table class="data-table">
+    <thead><tr><th>Day</th><th>Cost</th></tr></thead>
+    <tbody>
+      {% for d in costs.daily %}
+      <tr><td>{{ d.day }}</td><td>${{ '%.2f'|format(d.cost_usd) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No cost data yet.</p>
+  {% endif %}
+
+  <h2>Weekly</h2>
+  {% if costs.weekly %}
+  <table class="data-table">
+    <thead><tr><th>Week of</th><th>Cost</th></tr></thead>
+    <tbody>
+      {% for w in costs.weekly %}
+      <tr><td>{{ w.week_start }}</td><td>${{ '%.2f'|format(w.cost_usd) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No cost data yet.</p>
+  {% endif %}
+
+  <h2>Attribution</h2>
+  {% if costs.attribution %}
+  <table class="data-table">
+    <thead><tr><th>Dimension</th><th>Key</th><th>Cost</th><th>Events</th></tr></thead>
+    <tbody>
+      {% for a in costs.attribution %}
+      <tr>
+        <td>{{ a.dimension }}</td>
+        <td>{{ a.key }}</td>
+        <td>${{ '%.2f'|format(a.cost_usd) }}</td>
+        <td>{{ a.event_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No attribution data yet.</p>
+  {% endif %}
+
+  <h2>The 5 metrics that matter</h2>
+  {% if costs.five_metrics %}
+  <div class="stat-tiles">
+    <div class="stat-tile">
+      <div class="stat-tile__label">Task completion rate</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.task_completion_rate is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.task_completion_rate * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Tool selection accuracy</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.tool_selection_accuracy is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.tool_selection_accuracy * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Autonomy score</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.autonomy_score is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.autonomy_score * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Recovery rate</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.recovery_rate is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.recovery_rate * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Cost / successful task</div>
+      {# A sub-cent value must never render as "$0.00" — a monitoring tool showing a false zero is
+         worse than showing nothing. Below a cent, say so explicitly. #}
+      <div class="stat-tile__value stat-tile__value--cost">{% if costs.five_metrics.cost_per_successful_task is none %}—{% elif costs.five_metrics.cost_per_successful_task > 0 and costs.five_metrics.cost_per_successful_task < 0.01 %}&lt;$0.01{% else %}${{ "%.2f"|format(costs.five_metrics.cost_per_successful_task) }}{% endif %}</div>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty-state">No data yet.</p>
+  {% endif %}
+
+  {% include "partials/provenance_footer.html" %}
+</section>

@@ -1,0 +1,71 @@
+[project]
+name = "boss-ai-monitoring"
+version = "0.1.0"
+description = "Single-user observability dashboard for Claude Code usage: cost, tokens, tools, sessions"
+readme = "README.md"
+authors = [
+    { name = "Malcolm Jones", email = "bossjones@theblacktonystark.com" }
+]
+requires-python = ">=3.13"
+license = { text = "MIT" }
+dependencies = [
+    "duckdb>=1.5.4",
+    "fastapi>=0.139.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "langsmith>=0.10.2",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "pyyaml>=6.0.3",
+    "sse-starlette>=3.4.5",
+    "uvicorn>=0.51.0",
+]
+
+[project.scripts]
+bam = "boss_ai_monitoring.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/boss_ai_monitoring"]
+
+[dependency-groups]
+dev = [
+    "codespell>=2.4.2",
+    "playwright>=1.61.0",
+    "pre-commit>=4.6.0",
+    "pyrefly>=1.1.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.15.21",
+]
+notebooks = [
+    "marimo>=0.23.14",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+# .claude/ and logs/ are human-owned harness files, not part of the package.
+extend-exclude = [".claude", "logs", "specs", "notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+project-excludes = ["**/.venv/**", "notebooks/**"]
+
+[tool.codespell]
+skip = "./.git,./.venv,./uv.lock,./specs,./logs,./.ruff_cache,./htmlcov,./docs/img,./src/boss_ai_monitoring/web/static"
+# iterm: a real terminal name in captured OTLP fixtures (terminal.type=iTerm.app), not a typo.
+ignore-words-list = "asend,nd,iterm"

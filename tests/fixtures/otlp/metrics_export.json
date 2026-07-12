@@ -1,0 +1,49 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}},
+          {"key": "service.name", "value": {"stringValue": "claude-code"}}
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "metrics": [
+            {
+              "name": "claude_code.token.usage",
+              "unit": "tokens",
+              "sum": {
+                "aggregationTemporality": 1,
+                "isMonotonic": true,
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1783764000000000000",
+                    "timeUnixNano": "1783764060000000000",
+                    "asInt": "412",
+                    "attributes": [
+                      {"key": "type", "value": {"stringValue": "output"}},
+                      {"key": "model", "value": {"stringValue": "claude-sonnet-5"}},
+                      {"key": "query_source", "value": {"stringValue": "main"}}
+                    ]
+                  },
+                  {
+                    "startTimeUnixNano": "1783764000000000000",
+                    "timeUnixNano": "1783764060000000000",
+                    "asInt": "1820",
+                    "attributes": [
+                      {"key": "type", "value": {"stringValue": "input"}},
+                      {"key": "model", "value": {"stringValue": "claude-sonnet-5"}},
+                      {"key": "query_source", "value": {"stringValue": "main"}}
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+<footer class="provenance-footer">
+  {% for s in provenance.sources %}
+  <span class="provenance-footer__source">
+    <strong>{{ s.source }}</strong>:
+    {% if s.last_seen %}{{ s.last_seen }}{% else %}no data{% endif %}
+    ({{ s.event_count }} events)
+  </span>
+  {% endfor %}
+  <span class="provenance-footer__drift provenance-footer__drift--{{ provenance.drift_status }}">
+    drift: {{ provenance.drift_status }}
+  </span>
+  {% for j in provenance.job_statuses %}
+  <span class="provenance-footer__job provenance-footer__job--{{ j.status }}">
+    {{ j.name }}: {{ j.status }} ({{ j.last_run_at }})
+  </span>
+  {% endfor %}
+</footer>

@@ -1,0 +1,44 @@
+<section class="panel" id="live-panel" hx-ext="sse" sse-connect="/api/events/stream">
+  <h1>Live</h1>
+  <p class="empty-state" id="live-sse-ticker" sse-swap="message">Waiting for live events&hellip;</p>
+
+  <h2>Active sessions</h2>
+  {% if live.active_sessions %}
+  <div class="active-session-cards">
+    {% for card in live.active_sessions %}
+    <div class="active-session-card">
+      <a href="/sessions/{{ card.session_id }}" hx-get="/sessions/{{ card.session_id }}" hx-target="#main" hx-push-url="true">{{ card.session_id }}</a>
+      <div class="active-session-card__cost">${{ '%.2f'|format(card.running_cost_usd) }}</div>
+      <div class="active-session-card__duration">{{ card.running_duration_ms }} ms</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty-state">No active sessions right now.</p>
+  {% endif %}
+
+  <h2>Recent events</h2>
+  {% if live.recent_events %}
+  <table class="data-table" id="live-event-feed">
+    <thead>
+      <tr><th>Time</th><th>Source</th><th>Type</th><th>Session</th><th>Tool</th><th>Cost</th></tr>
+    </thead>
+    <tbody>
+      {% for e in live.recent_events %}
+      <tr>
+        <td>{{ e.ts }}</td>
+        <td>{{ e.source }}</td>
+        <td>{{ e.event_type }}</td>
+        <td>{{ e.session_id or "—" }}</td>
+        <td>{{ e.tool_name or "—" }}</td>
+        <td>{% if e.cost_usd %}${{ '%.4f'|format(e.cost_usd) }}{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty-state">No events yet.</p>
+  {% endif %}
+
+  {% include "partials/provenance_footer.html" %}
+</section>

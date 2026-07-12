@@ -1,0 +1,31 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "session.id", "value": {"stringValue": "5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "com.anthropic.claude_code", "version": "2.1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1783764001000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "tool_decision"}},
+                {"key": "prompt.id", "value": {"stringValue": "prompt-7f3c1a2b"}},
+                {"key": "tool_name", "value": {"stringValue": "Bash"}},
+                {"key": "tool_use_id", "value": {"stringValue": "toolu_01AbCdEfGhIjKlMnOp"}},
+                {"key": "decision", "value": {"stringValue": "accept"}},
+                {"key": "source", "value": {"stringValue": "config"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

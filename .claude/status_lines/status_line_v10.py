@@ -44,13 +44,27 @@ RESET = "\033[0m"
 
 # Adobe-discounted prices (USD per 1M tokens), global rates: (input, output)
 ADOBE_PRICING: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5": (0.90, 4.50),
-    "claude-sonnet-4-5": (2.70, 13.50),
-    "claude-opus-4-5": (4.50, 22.50),
-    "claude-opus-4-6": (4.50, 22.50),
-    # Opus 4.7 list price not yet published; assume same list as 4.6 ($5/$25)
-    # with the same 10% Adobe discount → $4.50/$22.50.
+    # Claude 5 family
+    "claude-fable-5": (9.00, 45.00),
+    "claude-mythos-5": (9.00, 45.00),  # limited availability
+    # Opus
+    "claude-opus-4-8": (4.50, 22.50),
     "claude-opus-4-7": (4.50, 22.50),
+    "claude-opus-4-6": (4.50, 22.50),
+    "claude-opus-4-5": (4.50, 22.50),
+    "claude-opus-4-1": (13.50, 67.50),  # deprecated
+    "claude-opus-4": (13.50, 67.50),  # retired except Bedrock/GCP
+    # Sonnet
+    # NOTE: Sonnet 5 has a pricing cliff — $2/$10 standard (this Adobe rate)
+    # through 2026-08-31, then $3/$15 standard ($2.70/$13.50 Adobe) from
+    # 2026-09-01. Update this entry after that date.
+    "claude-sonnet-5": (1.80, 9.00),
+    "claude-sonnet-4-6": (2.70, 13.50),
+    "claude-sonnet-4-5": (2.70, 13.50),
+    "claude-sonnet-4": (2.70, 13.50),  # retired except Bedrock/GCP
+    # Haiku
+    "claude-haiku-4-5": (0.90, 4.50),
+    "claude-haiku-3-5": (0.72, 3.60),  # retired except Bedrock/GCP
 }
 # Fallback for unknown/newer models — opus-tier global Adobe rates
 DEFAULT_PRICING: tuple[float, float] = (4.50, 22.50)

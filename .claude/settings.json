@@ -113,7 +113,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run pyrefly check --baseline pyrefly-baseline.json src tests tools .claude/status_lines/status_line_v10.py >&2 || exit 2",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/pyrefly_session_scope.py",
             "timeout": 30
           }
         ]
