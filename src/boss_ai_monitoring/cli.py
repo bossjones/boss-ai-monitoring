@@ -27,7 +27,7 @@ from boss_ai_monitoring import __version__
 from boss_ai_monitoring.config import BamSettings, load_settings
 from boss_ai_monitoring.ingest import jsonl as jsonl_ingest
 from boss_ai_monitoring.ingest import langsmith_poll as langsmith_ingest
-from boss_ai_monitoring.jobs.live import build_live_callables
+from boss_ai_monitoring.jobs.live import build_live_callables, persist_job_status
 from boss_ai_monitoring.jobs.scheduler import JobScheduler
 from boss_ai_monitoring.store.writer import get_writer, snapshot
 
@@ -85,13 +85,24 @@ async def _run_langsmith_poller(settings: BamSettings) -> None:
     )
 
 
-async def _run_jobs(settings: BamSettings) -> None:
-    """Trailing quality jobs (correction scan, OTel-vs-JSONL drift, error classification)."""
-    scheduler = JobScheduler.from_settings(
+def _build_job_scheduler(settings: BamSettings) -> JobScheduler:
+    """Wire the trailing jobs to their callables AND to result persistence.
+
+    `persist=` is not optional in practice: without it the jobs run and their results go nowhere,
+    so no `job_run` events are ever written and the dashboard's provenance footer reads
+    `drift: unknown` forever — the job looks dead while it is in fact running every interval.
+    `jobs/live.py::persist_job_status` exists for exactly this composition.
+    """
+    return JobScheduler.from_settings(
         settings.jobs,
         build_live_callables(settings.store.db_path),
+        persist=lambda result: persist_job_status(get_writer(settings), result),
     )
-    await scheduler.run_forever()
+
+
+async def _run_jobs(settings: BamSettings) -> None:
+    """Trailing quality jobs (correction scan, OTel-vs-JSONL drift, error classification)."""
+    await _build_job_scheduler(settings).run_forever()
 
 
 async def _supervise(name: str, coro: Awaitable[None]) -> None:
