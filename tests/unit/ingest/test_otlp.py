@@ -423,3 +423,46 @@ class TestRealCapturedSession:
         assert ("mcp_server_connection", "telegram", "connected") in infra_rows
         assert ("plugin_loaded", "third-party", None) in infra_rows
         assert ("hook_registered", "PreToolUse", None) in infra_rows
+
+
+DECISION_ERROR_FIXTURE = FIXTURES_DIR / "real_decision_error_session.json"
+
+
+class TestRealDecisionAndErrorSession:
+    """outstanding.md P2: autonomy_score and recovery_rate have never run on real data.
+
+    Both are NULL on every dataset so far because nothing real ever emitted `tool_decision` or
+    `api_error`. This fixture must be CAPTURED from a live session (a config-denied tool for
+    tool_decision, a failed API call + retry for api_error/recovery) via the runbook in
+    scripts/capture_otlp_fixture.py, then sanitized exactly like real_session_logs.json.
+    """
+
+    @pytest.mark.skipif(
+        not DECISION_ERROR_FIXTURE.exists(),
+        reason=(
+            "HUMAN STEP pending: capture a real tool_decision/api_error session per the "
+            "scripts/capture_otlp_fixture.py runbook (outstanding.md P2), sanitize, and save "
+            "as tests/fixtures/otlp/real_decision_error_session.json"
+        ),
+    )
+    def test_autonomy_and_recovery_compute_from_real_payload(
+        self, client: TestClient, db_path: Path
+    ) -> None:
+        payload = json.loads(DECISION_ERROR_FIXTURE.read_text())
+
+        assert client.post("/v1/logs", json=payload).status_code == 200
+
+        conn = duckdb.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT autonomy_score, recovery_rate FROM v_five_metrics"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        autonomy_score, recovery_rate = row
+
+        assert autonomy_score is not None, "a real tool_decision must move autonomy_score"
+        assert 0.0 <= autonomy_score <= 1.0
+        assert recovery_rate is not None, "a real api_error must move recovery_rate"
+        assert 0.0 <= recovery_rate <= 1.0
