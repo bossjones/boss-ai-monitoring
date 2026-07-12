@@ -153,3 +153,24 @@ def test_db_path_expands_user_home(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.store.db_path == Path.home() / "bam-home.duckdb"
     assert settings.store.db_path.is_absolute()
+
+
+def test_snapshot_dir_follows_the_db_path_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshots must live NEXT TO the DB, not at a hardcoded home-relative path.
+
+    In Docker the DB is on the `bam_data:/data` volume (`BAM_STORE__DB_PATH=/data/bam.duckdb`).
+    A default of `~/.local/share/.../snapshots` would drop snapshots on the container's ephemeral
+    filesystem — outside the volume, gone on restart.
+    """
+    monkeypatch.setenv("BAM_STORE__DB_PATH", "/data/bam.duckdb")
+
+    settings = load_settings()
+
+    assert settings.store.snapshot_dir == Path("/data/snapshots")
+
+
+def test_snapshot_dir_can_still_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BAM_STORE__DB_PATH", "/data/bam.duckdb")
+    monkeypatch.setenv("BAM_STORE__SNAPSHOT_DIR", "/elsewhere/snaps")
+
+    assert load_settings().store.snapshot_dir == Path("/elsewhere/snaps")

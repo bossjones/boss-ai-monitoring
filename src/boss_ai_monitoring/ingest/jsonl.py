@@ -307,7 +307,11 @@ async def run_forever(
     count = 0
     while iterations is None or count < iterations:
         try:
-            scan_once(projects_dir, writer)
+            # OFF THE EVENT LOOP. `scan_once` is synchronous and, over a real ~/.claude/projects,
+            # takes minutes on the first backfill — awaiting it directly freezes the whole app
+            # (dashboard, OTLP receiver, SSE) for the duration. The EventWriter serializes its own
+            # writes behind a lock, so it is safe to call from a worker thread.
+            await asyncio.to_thread(scan_once, projects_dir, writer)
         except Exception:
             logger.exception("jsonl: scan pass failed, will retry next interval")
         count += 1

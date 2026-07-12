@@ -21,6 +21,10 @@ store:
   db_path: ~/.local/share/boss-ai-monitoring/bam.duckdb
   batch_size: 500             # events buffered before the Appender flushes
   flush_interval_ms: 1000     # ...or this long, whichever comes first
+  # Where `bam snapshot` writes consistent copies you can read WHILE the app is running.
+  # Defaults to <db_path>/../snapshots, so it follows the database (in Docker that keeps
+  # snapshots on the same volume as the DB). Uncomment only to put them somewhere else.
+  # snapshot_dir: ~/.local/share/boss-ai-monitoring/snapshots
 
 ingest:
   jsonl_scan_interval_s: 15           # how often to re-scan ~/.claude/projects for new bytes

@@ -399,3 +399,44 @@ async def test_run_forever_survives_a_failing_pass(
         )
 
     assert calls == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_scan_does_not_block_the_event_loop(tmp_path: Path, monkeypatch) -> None:
+    """`scan_once` is synchronous and, over a real ~/.claude/projects, takes MINUTES.
+
+    Awaited directly on the loop it freezes the whole app — dashboard, OTLP receiver and all —
+    while the first backfill runs. Found live: a fresh `bam serve` grew a 525MB database while
+    every HTTP request hung. It must run off the loop.
+    """
+    import asyncio
+
+    import boss_ai_monitoring.ingest.jsonl as jsonl_module
+
+    ticks = 0
+    ticks_seen_during_scan = -1
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        for _ in range(40):
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    def slow_blocking_scan(*_args: Any, **_kwargs: Any) -> ScanStats:
+        nonlocal ticks_seen_during_scan
+        time.sleep(0.25)  # stands in for a real multi-minute backfill
+        # The count AT THE END OF THE SCAN is the whole test: if the scan ran on the event loop,
+        # the heartbeat could not have advanced at all while we slept here.
+        ticks_seen_during_scan = ticks
+        return ScanStats(files_scanned=0, events_written=0)
+
+    monkeypatch.setattr(jsonl_module, "scan_once", slow_blocking_scan)
+
+    await asyncio.gather(
+        run_forever(tmp_path, None, interval_s=0, iterations=1),  # type: ignore[arg-type]
+        heartbeat(),
+    )
+
+    assert ticks_seen_during_scan > 0, (
+        "the event loop was frozen for the whole scan — no other coroutine could run"
+    )

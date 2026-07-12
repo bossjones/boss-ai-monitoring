@@ -58,7 +58,12 @@ Then use Claude Code as usual and watch `/live`. Useful commands:
 just check                              # the definition of done: ruff + format + pyrefly + codespell + pytest
 just dev                                # bam serve with reload
 uv run bam config db-path               # print the RESOLVED DuckDB path
+uv run bam snapshot                     # consistent DB copy you can query WHILE the app runs
+
+# app stopped:
 duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+# app running (the live file is locked — snapshot instead):
+duckdb "$(uv run bam snapshot)" "SELECT source, count(*) FROM events GROUP BY 1"
 ```
 
 > Always use `"$(uv run bam config db-path)"` in shell commands. A bare `$BAM_DB_PATH` is unset in
@@ -113,11 +118,16 @@ stay visible in a LangSmith-only bucket rather than being silently merged into t
 ## Exploring the data (marimo)
 
 ```bash
-uvx marimo edit notebooks/explore.py    # interactive
-uvx marimo run notebooks/explore.py     # app mode
+# app stopped — read the live DB directly
+uvx marimo edit notebooks/explore.py
+
+# app RUNNING — explore a snapshot instead (DuckDB's file lock is exclusive cross-process)
+BAM_STORE__DB_PATH="$(uv run bam snapshot)" uvx marimo edit notebooks/explore.py
 ```
 
-The notebook opens a **read-only** DuckDB connection, so it never fights the running app's writer.
+The notebook only ever opens a **read-only** connection. That is enough *in-process*, but not
+across processes — see [Known limitations](#known-limitations). `bam snapshot` is the way around
+it, and it does not require stopping the app.
 
 ## Running in Docker
 
@@ -134,21 +144,25 @@ One service, a volume for the DuckDB file, and a **read-only** mount of `~/.clau
 
 ## Known limitations
 
-**You cannot query the DuckDB file from another process while the app is running.** DuckDB takes an
-exclusive file lock, so `duckdb "$(uv run bam config db-path)" ...` and `marimo run
-notebooks/explore.py` both fail with `IO Error: Could not set lock on file ...` while `bam serve`
-holds it. `duckdb -readonly` does **not** get around this — the lock is exclusive regardless.
+**A second process cannot open the live DuckDB file while the app is writing.** DuckDB takes an
+exclusive file lock, so once `bam serve` has ingested anything, a direct
+`duckdb "$(uv run bam config db-path)" ...` fails with `IO Error: Could not set lock on file ...`.
+`duckdb -readonly` does **not** get around it — the lock is exclusive regardless. (The writer is
+created lazily, so an *idle* app holds no lock; the error only appears after the first event.)
 
-Stop the app first, then run your query or open the notebook:
+You do **not** need to stop the app. Use `bam snapshot` — the running app owns the only usable
+connection, so it hands you a consistent point-in-time copy (tables *and* views) instead:
 
 ```bash
-# stop `bam serve`, then:
-duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+duckdb "$(uv run bam snapshot)" "SELECT source, count(*) FROM events GROUP BY 1"
 ```
 
-This is inherent to the single-file, single-writer design (one DuckDB file, one write connection) —
-the tradeoff that buys the app its simplicity. In-process readers are unaffected: the dashboard and
-the trailing jobs read happily while ingest is writing.
+`bam snapshot` prints only the path, so it composes. With the app stopped it snapshots in-process
+instead, so the same command works either way.
+
+The single-file, single-writer design (one DuckDB file, one write connection) is the tradeoff that
+buys the app its simplicity. In-process readers are unaffected: the dashboard and the trailing jobs
+read happily while ingest is writing.
 
 ## Privacy
 

@@ -157,3 +157,74 @@ def test_snapshot_asks_the_running_app_when_one_is_up(
 
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == str(served)
+
+
+class TestServeStartsBackgroundWork:
+    """`bam serve` must actually RUN the ingest loops and the trailing jobs.
+
+    Found during close-out: the JSONL scanner, the LangSmith poller and the JobScheduler were all
+    implemented, tested, and never started — `_serve_both` only launched the two uvicorn Servers.
+    OTLP still worked (it is an HTTP route), so the app LOOKED fine while two of its three ingest
+    sources were dead in production and the trailing jobs never ran once (`drift: unknown` in the
+    provenance footer was the visible symptom nobody chased).
+    """
+
+    def test_serve_launches_ingest_loops_and_the_job_scheduler(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started: list[str] = []
+
+        class FakeServer:
+            def __init__(self, config: Any) -> None:
+                self.config = config
+
+            async def serve(self) -> None:
+                started.append(f"uvicorn:{self.config.port}")
+
+        async def fake_jsonl(*_a: Any, **_k: Any) -> None:
+            started.append("jsonl")
+
+        async def fake_langsmith(*_a: Any, **_k: Any) -> None:
+            started.append("langsmith")
+
+        async def fake_jobs(*_a: Any, **_k: Any) -> None:
+            started.append("jobs")
+
+        monkeypatch.setenv("BAM_STORE__DB_PATH", str(tmp_path / "bam.duckdb"))
+        monkeypatch.setenv("BAM_INGEST__LANGSMITH_PROJECT", "proj")
+        monkeypatch.setattr(cli.uvicorn, "Server", FakeServer)
+        monkeypatch.setattr(cli, "_run_jsonl_scanner", fake_jsonl)
+        monkeypatch.setattr(cli, "_run_langsmith_poller", fake_langsmith)
+        monkeypatch.setattr(cli, "_run_jobs", fake_jobs)
+
+        assert cli.main(["serve"]) == 0
+
+        assert "jsonl" in started, "the JSONL scanner never started"
+        assert "langsmith" in started, "the LangSmith poller never started"
+        assert "jobs" in started, "the trailing job scheduler never started"
+        assert "uvicorn:8000" in started and "uvicorn:4318" in started
+
+    def test_a_crashing_background_loop_does_not_take_the_server_down(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ingest is best-effort. A dead poller must not kill the dashboard."""
+        served: list[str] = []
+
+        class FakeServer:
+            def __init__(self, config: Any) -> None:
+                self.config = config
+
+            async def serve(self) -> None:
+                served.append(f"uvicorn:{self.config.port}")
+
+        async def boom(*_a: Any, **_k: Any) -> None:
+            raise RuntimeError("poller exploded")
+
+        monkeypatch.setenv("BAM_STORE__DB_PATH", str(tmp_path / "bam.duckdb"))
+        monkeypatch.setattr(cli.uvicorn, "Server", FakeServer)
+        monkeypatch.setattr(cli, "_run_jsonl_scanner", boom)
+        monkeypatch.setattr(cli, "_run_langsmith_poller", boom)
+        monkeypatch.setattr(cli, "_run_jobs", boom)
+
+        assert cli.main(["serve"]) == 0
+        assert served == ["uvicorn:8000", "uvicorn:4318"]

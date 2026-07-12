@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_CONFIG_FILENAME = "config.yaml"
@@ -53,7 +53,25 @@ class StoreSettings(BaseModel):
     flush_interval_ms: int = 1000
     # Where `bam snapshot` drops consistent copies for the duckdb CLI / marimo to read while the
     # app keeps running (OQ-05). The server picks the filename; callers never supply a path.
+    #
+    # Defaults to `<db_path>.parent / "snapshots"` so it FOLLOWS the database. A hardcoded
+    # home-relative default would break Docker: the DB lives on the `bam_data:/data` volume
+    # (`BAM_STORE__DB_PATH=/data/bam.duckdb`), so snapshots would land on the container's
+    # ephemeral filesystem, outside the volume, and vanish on restart.
     snapshot_dir: Path = Path("~/.local/share/boss-ai-monitoring/snapshots")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _snapshot_dir_follows_db_path(cls, data: Any) -> Any:
+        """Derive the default BEFORE field validation, so `snapshot_dir` stays a plain `Path`.
+
+        Doing this in an `after` validator would force the field to be `Path | None`, leaking an
+        Optional into every consumer for no reason.
+        """
+        if not isinstance(data, dict) or data.get("snapshot_dir"):
+            return data
+        db_path = data.get("db_path") or cls.model_fields["db_path"].default
+        return {**data, "snapshot_dir": Path(_as_absolute_path(db_path)).parent / "snapshots"}
 
     @field_validator("db_path", "snapshot_dir", mode="before")
     @classmethod

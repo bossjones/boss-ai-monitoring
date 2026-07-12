@@ -394,3 +394,49 @@ README is lead-owned).
 
 ---
 (end of current questions)
+
+---
+
+## RESOLUTION LOG — appended 2026-07-12 (post-build close-out)
+
+The `Status:` lines in the original blocks above are frozen as written (append-only protocol).
+Three of them are STALE and read as open ship-blockers when they are not. Current truth:
+
+### OQ-02 — `EventWriter.flush()` not thread-safe → **RESOLVED**
+Fixed at the source: `flush()` now holds `self._lock` across the ENTIRE DB round-trip, not just the
+buffer swap. 📡 otlp's local `_flush_lock` stopgap was then removed as redundant (`091a2eb`,
+`30cb2b0`), and ✅ validator confirmed it. The original block's `My best guess:` was correct.
+
+### OQ-04 — `connect_read_only()` vs a live in-process writer → **RESOLVED**
+`1c0c938 fix(store): make connect_read_only() writer-aware — closes OQ-04 ship-blocker`. When a
+writer for the path is live, it hands back a `.cursor()` off that same connection (MVCC) instead of
+attempting a second read-only connect, which DuckDB refuses.
+
+### OQ-jsonl-03 — OQ-04 breaking `just check` at HEAD → **RESOLVED**
+Was a consequence of OQ-04, not an independent question. Closed by the same fix. `just check` is
+green (226+ tests, pyrefly 0 errors).
+
+### OQ-05 — DuckDB's file lock is exclusive CROSS-process → **RESOLVED (feature)**
+This was the honest, load-bearing finding of the run: the spec's "readers never fight the writer"
+claim is only half true. Fixed properly rather than documented away — `bam snapshot` asks the
+RUNNING app for a consistent point-in-time copy (`ATTACH` + `COPY FROM DATABASE` on the writer's own
+connection, under the flush lock). You no longer stop the app to query your own data.
+Proof: `docs/PROOF.md`.
+
+### OQ-03 — OTLP fixtures built from docs, not a live capture → **RESOLVED, and it found something**
+Captured a REAL OTLP export at the wire from a telemetry-enabled `claude -p` (Claude Code 2.1.207,
+2026-07-11), sanitized the PII (user.email / user.id / account uuids / organization.id / session.id),
+and committed it as `tests/fixtures/otlp/real_session_logs.json`.
+
+The capture was worth doing. A live session emits SIX event types no doc-derived fixture covered:
+`hook_registered`, `plugin_loaded`, `mcp_server_connection`, `hook_execution_start`,
+`hook_execution_complete`, `assistant_response`. Our parser accepts them and stores them raw in the
+`payload` column — nothing is dropped — now proven by
+`tests/unit/ingest/test_otlp.py::TestRealCapturedSession` against real bytes instead of an invented
+`some_future_event`.
+
+Also confirmed at the wire, which we had only ever taken on trust: with the content-capture flags
+OFF (the default), Claude Code sends `prompt=<REDACTED>` itself. Only `prompt_length` survives.
+G8 holds, and a test now fails loudly if a future version stops redacting.
+
+Remaining follow-ups live in `specs/outstanding.md`, not here.

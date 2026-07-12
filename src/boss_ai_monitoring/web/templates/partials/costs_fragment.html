@@ -69,7 +69,9 @@
     </div>
     <div class="stat-tile">
       <div class="stat-tile__label">Cost / successful task</div>
-      <div class="stat-tile__value stat-tile__value--cost">{% if costs.five_metrics.cost_per_successful_task is none %}—{% else %}${{ "%.2f"|format(costs.five_metrics.cost_per_successful_task) }}{% endif %}</div>
+      {# A sub-cent value must never render as "$0.00" — a monitoring tool showing a false zero is
+         worse than showing nothing. Below a cent, say so explicitly. #}
+      <div class="stat-tile__value stat-tile__value--cost">{% if costs.five_metrics.cost_per_successful_task is none %}—{% elif costs.five_metrics.cost_per_successful_task > 0 and costs.five_metrics.cost_per_successful_task < 0.01 %}&lt;$0.01{% else %}${{ "%.2f"|format(costs.five_metrics.cost_per_successful_task) }}{% endif %}</div>
     </div>
   </div>
   {% else %}

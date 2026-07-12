@@ -332,3 +332,69 @@ class TestMetricsEndpoint:
         )
 
         assert response.status_code == 400
+
+
+class TestRealCapturedSession:
+    """OQ-03: the other fixtures were built from Anthropic's published docs, not a live session.
+
+    This one is a REAL OTLP export, captured at the wire from `claude -p` with telemetry on
+    (2026-07-11, Claude Code 2.1.207), then sanitized — user.email / user.id / account uuids /
+    organization.id / session.id replaced with placeholders. Nothing else was touched.
+
+    Capturing it found something the doc-derived fixtures missed: a real session emits event types
+    we never modeled (hook_registered, plugin_loaded, mcp_server_connection, hook_execution_*).
+    They must land raw in `payload` rather than crash or be dropped — that is the whole point of
+    the JSON payload column (G5), and until now it was only tested against an invented
+    "some_future_event".
+    """
+
+    REAL = Path(__file__).resolve().parents[2] / "fixtures" / "otlp" / "real_session_logs.json"
+
+    def test_real_export_is_accepted_and_nothing_is_dropped(
+        self, client: TestClient, db_path: Path
+    ) -> None:
+        payload = json.loads(self.REAL.read_text())
+        sent = [
+            attr["value"]["stringValue"]
+            for rl in payload["resourceLogs"]
+            for sl in rl["scopeLogs"]
+            for rec in sl["logRecords"]
+            for attr in rec.get("attributes", [])
+            if attr["key"] == "event.name"
+        ]
+
+        response = client.post("/v1/logs", json=payload)
+
+        assert response.status_code == 200
+        stored = {row["event_type"] for row in _events(db_path)}
+        assert stored == set(sent), "every real event type must be stored, not silently dropped"
+
+    def test_event_types_absent_from_our_schema_are_kept_raw(
+        self, client: TestClient, db_path: Path
+    ) -> None:
+        """The types a live session actually emits, which no doc-derived fixture covered."""
+        payload = json.loads(self.REAL.read_text())
+
+        assert client.post("/v1/logs", json=payload).status_code == 200
+
+        rows = {row["event_type"]: row for row in _events(db_path)}
+        for unmodelled in ("hook_registered", "plugin_loaded", "mcp_server_connection"):
+            assert unmodelled in rows, f"{unmodelled} is emitted by real sessions and was dropped"
+            assert json.loads(rows[unmodelled]["payload"]), f"{unmodelled} payload must be kept raw"
+
+    def test_prompt_content_is_redacted_by_claude_code_itself(self) -> None:
+        """G8, verified against the wire: with the content-capture flags OFF (the default),
+        Claude Code sends `prompt=<REDACTED>` and only the LENGTH survives. We never had to
+        redact it ourselves — but if a future version stops doing so, this test says so loudly.
+        """
+        payload = json.loads(self.REAL.read_text())
+        attrs = {
+            attr["key"]: attr["value"].get("stringValue")
+            for rl in payload["resourceLogs"]
+            for sl in rl["scopeLogs"]
+            for rec in sl["logRecords"]
+            for attr in rec.get("attributes", [])
+        }
+
+        assert attrs.get("prompt") == "<REDACTED>"
+        assert attrs.get("prompt_length") == "30"

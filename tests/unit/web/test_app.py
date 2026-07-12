@@ -184,6 +184,28 @@ class TestCostsRoute:
         body = response.json()
         assert any(row["dimension"] == "model" for row in body["attribution"])
 
+    def test_sub_cent_cost_per_task_never_renders_as_a_false_zero(
+        self, client, fixture_conn, insert_event
+    ):
+        """Caught on the real dashboard: cost_per_successful_task was 0.00042 and the "%.2f"
+        format rendered it as "$0.00". A monitoring tool that reports a non-zero cost as zero is
+        lying; show "<$0.01" instead.
+        """
+        for i in range(300):  # many tasks, tiny total cost -> a sub-cent per-task figure
+            insert_event(
+                fixture_conn,
+                event_id=f"tiny-{i}",
+                prompt_id=f"p-{i}",
+                model="claude-sonnet-5",
+                cost_usd=0.0001,
+            )
+
+        response = client.get("/costs")
+
+        assert response.status_code == 200
+        assert "$0.00<" not in response.text
+        assert "&lt;$0.01" in response.text or "<$0.01" in response.text
+
 
 class _FakeRequest:
     """Drives `_poll_events`'s disconnect check deterministically -- no real ASGI cycle."""

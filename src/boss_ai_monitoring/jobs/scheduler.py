@@ -121,9 +121,14 @@ class JobScheduler:
                 continue
             started_at = self._clock()
             try:
-                outcome = job.func()
-                if asyncio.iscoroutine(outcome):
-                    outcome = await outcome
+                # The live jobs are SYNCHRONOUS DuckDB scans (drift check, correction scan, error
+                # classification) over the whole events table. Called inline they block the event
+                # loop, and with it the dashboard and the OTLP receiver. Async jobs still run
+                # inline — only the blocking ones are pushed to a worker thread.
+                if asyncio.iscoroutinefunction(job.func):
+                    outcome = await job.func()
+                else:
+                    outcome = await asyncio.to_thread(job.func)
                 result = JobRunResult(
                     name=job.name,
                     status="ok",

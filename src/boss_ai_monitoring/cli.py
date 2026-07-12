@@ -16,7 +16,7 @@ import asyncio
 import importlib
 import logging
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 
 import httpx
@@ -25,7 +25,11 @@ from fastapi import FastAPI
 
 from boss_ai_monitoring import __version__
 from boss_ai_monitoring.config import BamSettings, load_settings
-from boss_ai_monitoring.store.writer import snapshot
+from boss_ai_monitoring.ingest import jsonl as jsonl_ingest
+from boss_ai_monitoring.ingest import langsmith_poll as langsmith_ingest
+from boss_ai_monitoring.jobs.live import build_live_callables
+from boss_ai_monitoring.jobs.scheduler import JobScheduler
+from boss_ai_monitoring.store.writer import get_writer, snapshot
 
 log = logging.getLogger("bam")
 
@@ -59,8 +63,60 @@ def build_app(settings: BamSettings) -> FastAPI:
     return create_app(settings)
 
 
+async def _run_jsonl_scanner(settings: BamSettings) -> None:
+    """Incremental reader over ~/.claude/projects — history and gap-fill."""
+    await jsonl_ingest.run_forever(
+        settings.ingest.claude_projects_dir,
+        get_writer(settings),
+        interval_s=settings.ingest.jsonl_scan_interval_s,
+    )
+
+
+async def _run_langsmith_poller(settings: BamSettings) -> None:
+    """Cursor-based LangSmith poll. Degrades gracefully with no project/key configured."""
+    project = settings.ingest.langsmith_project
+    if not project:
+        log.info("langsmith: no project configured — poller not started")
+        return
+    await langsmith_ingest.run_forever(
+        project,
+        get_writer(settings),
+        interval_s=settings.ingest.langsmith_poll_interval_s,
+    )
+
+
+async def _run_jobs(settings: BamSettings) -> None:
+    """Trailing quality jobs (correction scan, OTel-vs-JSONL drift, error classification)."""
+    scheduler = JobScheduler.from_settings(
+        settings.jobs,
+        build_live_callables(settings.store.db_path),
+    )
+    await scheduler.run_forever()
+
+
+async def _supervise(name: str, coro: Awaitable[None]) -> None:
+    """Run a background loop so that its death cannot take the servers down with it.
+
+    Ingest and the trailing jobs are best-effort: a LangSmith outage or a malformed transcript
+    must degrade the data, never the dashboard. Each loop already retries internally; this is the
+    outer net for anything that escapes.
+    """
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("%s: background loop died — the server keeps running without it", name)
+
+
 async def _serve_both(app: FastAPI, settings: BamSettings) -> None:
-    """Two uvicorn Servers, one loop, same app object."""
+    """Two uvicorn Servers, one loop, same app object — plus the background ingest/jobs loops.
+
+    The servers are the foreground work: when they return, we cancel everything else. Without
+    this wiring `bam serve` ingests OTLP only (it is an HTTP route) while the JSONL scanner, the
+    LangSmith poller and the job scheduler sit implemented-but-never-started — the app looks
+    healthy with two of its three sources dead.
+    """
     servers = [
         uvicorn.Server(
             uvicorn.Config(
@@ -79,7 +135,18 @@ async def _serve_both(app: FastAPI, settings: BamSettings) -> None:
             )
         ),
     ]
-    await asyncio.gather(*(server.serve() for server in servers))
+
+    background = [
+        asyncio.create_task(_supervise("jsonl", _run_jsonl_scanner(settings))),
+        asyncio.create_task(_supervise("langsmith", _run_langsmith_poller(settings))),
+        asyncio.create_task(_supervise("jobs", _run_jobs(settings))),
+    ]
+    try:
+        await asyncio.gather(*(server.serve() for server in servers))
+    finally:
+        for task in background:
+            task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
 
 
 def _cmd_serve(_args: argparse.Namespace) -> int:
