@@ -38,5 +38,15 @@ docker-build:
 test-docker:
     uv run pytest -m docker -v tests/integration/
 
+# LangSmith VCR replay suite (hermetic — also runs as part of plain `just test`/`check`).
+test-vcr:
+    uv run pytest -m langsmith_vcr -v tests/integration/langsmith
+
+# Re-record cassettes against the live LangSmith API (needs the direnv-ambient key),
+# then prove the recordings are secret-free before they can be committed.
+record-vcr:
+    direnv exec . uv run pytest tests/integration/langsmith --vcr-mode=all -v
+    uv run pytest tests/integration/langsmith/test_cassette_hygiene.py -v
+
 db-path:
     @uv run bam config db-path

@@ -41,6 +41,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "respx>=0.23.1",
     "ruff>=0.15.21",
+    "vcrpy>=7.0.0",
 ]
 notebooks = [
     "marimo>=0.23.14",
@@ -62,6 +63,7 @@ asyncio_mode = "auto"
 addopts = "-ra -m \"not docker\""
 markers = [
     "docker: requires Docker and docker compose; deselected by default, run via `just test-docker`",
+    "langsmith_vcr: replays recorded LangSmith API cassettes; hermetic, runs by default; record locally via just record-vcr",
 ]
 
 [tool.pyrefly]
