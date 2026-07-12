@@ -43,6 +43,19 @@ def settings(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return BamSettings()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the VCR record-mode option consumed by tests/integration/langsmith."""
+    parser.addoption(
+        "--vcr-mode",
+        type=str,
+        default="none",
+        help=(
+            "VCR record mode: none = replay-only (default, hermetic), "
+            "once = record if cassette missing, all = re-record against the live API"
+        ),
+    )
+
+
 @pytest.fixture
 def client_factory() -> Iterator[Callable[[FastAPI], TestClient]]:
     """Factory turning a FastAPI app into a TestClient, closed at teardown."""
