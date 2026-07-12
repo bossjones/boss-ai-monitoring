@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -269,3 +271,29 @@ class TestJobResultsArePersisted:
             conn.close()
 
         assert "drift_check" in names, "the drift job ran but its result was never persisted"
+
+
+class TestLangsmithLoudOmission:
+    """specs/outstanding.md P1(b): an unset LangSmith project must be LOUD.
+
+    The poller starting only on `BAM_INGEST__LANGSMITH_PROJECT` is deliberate (G4 — config.py is
+    the only env reader; the ambient LANGSMITH_PROJECT is NOT aliased). What was a defect is the
+    single log.info nobody reads: the feature looked broken with no visible explanation.
+    """
+
+    def test_poller_skip_logs_a_warning_naming_the_env_var(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from boss_ai_monitoring.config import BamSettings
+
+        monkeypatch.delenv("BAM_INGEST__LANGSMITH_PROJECT", raising=False)
+        settings = BamSettings()
+        assert settings.ingest.langsmith_project is None
+
+        with caplog.at_level(logging.WARNING, logger="bam"):
+            asyncio.run(cli._run_langsmith_poller(settings))
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("BAM_INGEST__LANGSMITH_PROJECT" in r.getMessage() for r in warnings), (
+            "the unset-project skip must WARN and name the exact env var to set"
+        )

@@ -271,3 +271,35 @@ class TestPollEvents:
         events = [item async for item in _poll_events(settings, request)]
 
         assert len(events) == 1
+
+
+class TestLangsmithBadge:
+    """outstanding.md P1(b): the dashboard must say WHY LangSmith rows are absent.
+
+    Hermetic w.r.t. ambient direnv exports: the autouse `isolated_env` fixture strips every
+    BAM_* var, so "unset" is the default here and "set" is an explicit monkeypatch.setenv.
+    """
+
+    def test_footer_shows_badge_when_project_unset(self, client):
+        response = client.get("/")
+
+        assert "langsmith: not configured" in response.text
+        assert "provenance-footer__langsmith--missing" in response.text
+        assert "BAM_INGEST__LANGSMITH_PROJECT" in response.text, (
+            "the badge must name the exact env var to set"
+        )
+
+    def test_footer_hides_badge_when_project_set(
+        self, db_path, fixture_conn, client_factory, monkeypatch
+    ):
+        from boss_ai_monitoring.config import BamSettings
+
+        monkeypatch.setenv("BAM_STORE__DB_PATH", str(db_path))
+        monkeypatch.setenv("BAM_INGEST__LANGSMITH_PROJECT", "proj")
+        app = create_app(BamSettings())
+        app.dependency_overrides[get_connection] = lambda: fixture_conn
+        client = client_factory(app)
+
+        response = client.get("/")
+
+        assert "langsmith: not configured" not in response.text

@@ -76,7 +76,14 @@ async def _run_langsmith_poller(settings: BamSettings) -> None:
     """Cursor-based LangSmith poll. Degrades gracefully with no project/key configured."""
     project = settings.ingest.langsmith_project
     if not project:
-        log.info("langsmith: no project configured — poller not started")
+        # outstanding.md P1(b): this omission must be LOUD. The ambient LANGSMITH_PROJECT that
+        # direnv exports for the `langsmith` CLI is deliberately NOT read — config.py is the only
+        # env reader (G4) — so a fresh user needs to be told the exact key the app does read.
+        log.warning(
+            "langsmith: poller NOT started — set BAM_INGEST__LANGSMITH_PROJECT to enable it. "
+            "The ambient LANGSMITH_PROJECT env var is deliberately not read (config.py is the "
+            "only env reader). The dashboard footer shows a badge until this is set."
+        )
         return
     await langsmith_ingest.run_forever(
         project,

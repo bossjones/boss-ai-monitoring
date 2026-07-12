@@ -18,7 +18,7 @@ NOW = datetime(2026, 7, 11, 12, 30, 0)
 
 class TestProvenanceFooter:
     def test_empty_db_reports_no_sources_seen(self, fixture_conn):
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert {s.source for s in footer.sources} == set(queries.SOURCES)
         assert all(s.last_seen is None and s.event_count == 0 for s in footer.sources)
@@ -29,7 +29,7 @@ class TestProvenanceFooter:
         insert_event(fixture_conn, event_id="e2", source="otlp", ts=datetime(2026, 7, 11, 11, 0))
         insert_event(fixture_conn, event_id="e3", source="jsonl", ts=datetime(2026, 7, 11, 9, 0))
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
         by_source = {s.source: s for s in footer.sources}
 
         assert by_source["otlp"].last_seen == datetime(2026, 7, 11, 11, 0)
@@ -54,7 +54,7 @@ class TestProvenanceFooter:
             payload='{"name": "drift_check", "status": "error"}',
         )
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert len(footer.job_statuses) == 1
         job = footer.job_statuses[0]
@@ -63,9 +63,17 @@ class TestProvenanceFooter:
         assert job.last_run_at == datetime(2026, 7, 11, 11, 0)
 
     def test_drift_status_is_unknown_with_no_drift_check_row(self, fixture_conn):
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert footer.drift_status == "unknown"
+
+    def test_footer_carries_langsmith_configured_flag(self, fixture_conn):
+        """outstanding.md P1(b): the footer must distinguish 'not configured' from 'idle'."""
+        configured = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
+        missing = queries.get_provenance_footer(fixture_conn, langsmith_configured=False)
+
+        assert configured.langsmith_configured is True
+        assert missing.langsmith_configured is False
 
     def test_drift_status_is_ok_when_latest_run_clean(self, fixture_conn, insert_event):
         insert_event(
@@ -75,7 +83,7 @@ class TestProvenanceFooter:
             payload='{"name": "drift_check", "status": "ok", "alert_count": 0}',
         )
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert footer.drift_status == "ok"
 
@@ -87,7 +95,7 @@ class TestProvenanceFooter:
             payload='{"name": "drift_check", "status": "ok", "alert_count": 3}',
         )
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert footer.drift_status == "alert"
 
@@ -99,7 +107,7 @@ class TestProvenanceFooter:
             payload='{"name": "drift_check", "status": "error", "alert_count": 0}',
         )
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert footer.drift_status == "error"
 
@@ -119,7 +127,7 @@ class TestProvenanceFooter:
             payload='{"name": "drift_check", "status": "ok", "alert_count": 0}',
         )
 
-        footer = queries.get_provenance_footer(fixture_conn)
+        footer = queries.get_provenance_footer(fixture_conn, langsmith_configured=True)
 
         assert footer.drift_status == "ok"
 
