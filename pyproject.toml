@@ -59,7 +59,10 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra"
+addopts = "-ra -m \"not docker\""
+markers = [
+    "docker: requires Docker and docker compose; deselected by default, run via `just test-docker`",
+]
 
 [tool.pyrefly]
 project-includes = ["src", "tests"]

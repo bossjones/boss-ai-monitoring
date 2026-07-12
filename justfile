@@ -34,5 +34,9 @@ dev:
 docker-build:
     docker compose build
 
+# Docker compose round-trip (build+up+curl+down). Slow, opt-in — not part of `check`.
+test-docker:
+    uv run pytest -m docker -v tests/integration/
+
 db-path:
     @uv run bam config db-path
