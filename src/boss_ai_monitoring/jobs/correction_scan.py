@@ -50,6 +50,37 @@ def _has_correction_phrase(text: str) -> bool:
     return any(phrase in lowered for phrase in CORRECTION_PHRASES)
 
 
+def _prompt_text(payload: object) -> str:
+    """The human's words out of a `user_prompt` payload, or "" if there are none.
+
+    The payload is the raw transcript entry (jsonl.py stores it verbatim), so the text lives at
+    `message.content` — which is EITHER a plain string or a list of content blocks. This used to
+    read `payload["text"]`, a key no ingest source has ever written: 0 of 4522 prompts in the live
+    DB have it, so `_has_correction_phrase` was never once reached and the phrase signal was dead
+    while the job still reported `ok`.
+
+    The top-level "text" fallback is kept only because some tests still build payloads that way.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # content blocks: text lives in the "text" blocks; tool_result/image blocks have none
+        return " ".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+
+    fallback = payload.get("text")
+    return fallback if isinstance(fallback, str) else ""
+
+
 def scan_corrections(
     events: Iterable[Event],
     *,
@@ -90,7 +121,7 @@ def scan_corrections(
                 continue
 
             prompt_count += 1
-            text = event.get("payload", {}).get("text", "")
+            text = _prompt_text(event.get("payload"))
             is_phrase_match = bool(text) and _has_correction_phrase(text)
             is_reprompt_match = last_failed_tool_ts is not None and (
                 0 <= (event["ts"] - last_failed_tool_ts).total_seconds() <= reprompt_window_s

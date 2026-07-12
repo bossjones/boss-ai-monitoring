@@ -264,6 +264,43 @@ class TestLogsEndpoint:
 
         assert response.status_code == 400
 
+    def test_wrong_shaped_but_valid_json_returns_400_not_500(
+        self, client: TestClient, db_path: Path
+    ) -> None:
+        """`parse_logs_payload` claims to be "defensive throughout ... never a crash", but it only
+        guards the *lists*, never the element types — so a well-formed JSON body of the wrong shape
+        reached `.get()` on a `str` and 500'd. An exporter sending junk must not be able to make the
+        receiver throw; the writer must survive to accept the next good batch.
+        """
+        for bad_body in (
+            {"resourceLogs": ["not-a-mapping"]},
+            {"resourceLogs": [{"scopeLogs": ["not-a-mapping"]}]},
+            {"resourceLogs": [{"scopeLogs": [{"logRecords": ["not-a-mapping"]}]}]},
+        ):
+            response = client.post("/v1/logs", json=bad_body)
+            assert response.status_code == 400, f"{bad_body!r} returned {response.status_code}"
+
+        follow_up = client.post("/v1/logs", json=_load_fixture("api_request.json"))
+        assert follow_up.status_code == 200
+        assert len(_events(db_path)) == 1
+
+    def test_uncastable_attribute_value_returns_400_not_500(self, client: TestClient) -> None:
+        """`_decode_any_value` did a bare `int()`/`float()` on exporter-supplied JSON."""
+        for bad_value in ({"intValue": "abc"}, {"doubleValue": "not-a-float"}, {"arrayValue": "x"}):
+            response = client.post(
+                "/v1/logs",
+                json={
+                    "resourceLogs": [
+                        {
+                            "scopeLogs": [
+                                {"logRecords": [{"attributes": [{"key": "k", "value": bad_value}]}]}
+                            ]
+                        }
+                    ]
+                },
+            )
+            assert response.status_code == 400, f"{bad_value!r} returned {response.status_code}"
+
     def test_gzip_content_encoding_accepted(self, client: TestClient, db_path: Path) -> None:
         payload = _load_fixture("api_request.json")
         compressed = gzip.compress(json.dumps(payload).encode("utf-8"))

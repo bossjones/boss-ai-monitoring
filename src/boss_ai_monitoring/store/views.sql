@@ -57,10 +57,12 @@ WITH task_times AS (
         any_value(session_id) AS session_id,
         min(ts) AS started_at,
         max(ts) AS ended_at,
-        sum(tokens_input) AS tokens_input,
-        sum(tokens_output) AS tokens_output,
-        sum(tokens_cache_read) AS tokens_cache_read,
-        sum(tokens_cache_creation) AS tokens_cache_creation,
+        -- coalesce or a task with no token-bearing events sums to NULL, and the session-detail
+        -- template renders that straight through as the literal string "None".
+        coalesce(sum(tokens_input), 0) AS tokens_input,
+        coalesce(sum(tokens_output), 0) AS tokens_output,
+        coalesce(sum(tokens_cache_read), 0) AS tokens_cache_read,
+        coalesce(sum(tokens_cache_creation), 0) AS tokens_cache_creation,
         count(*) FILTER (WHERE event_type = 'tool_result') AS tool_call_count
     FROM events
     WHERE prompt_id IS NOT NULL

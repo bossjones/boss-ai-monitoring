@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -73,13 +74,20 @@ def _event_defaults() -> Event:
 def _known_session_ids(writer: EventWriter) -> set[str]:
     """Local session_ids to join LangSmith `thread_id` against.
 
-    DuckDB refuses a second `read_only` connection to a file that already has a non-read-only
-    one open (the writer's), so this reads through the writer's own connection rather than
-    opening a fresh one — no new connection, the single-writer invariant (G5) still holds.
+    DuckDB refuses a second `read_only` connection to a file that already has a non-read-only one
+    open (the writer's), so this reads through the writer rather than opening a fresh one — no new
+    connection, the single-writer invariant (G5) still holds.
+
+    It must be `writer.cursor()`, NOT the writer's own connection object (OQ-06). DuckDB parks the
+    pending result ON the connection, so sharing it meant this full-table scan could hand ITS rows
+    to a concurrent `get_cursor()` on the jsonl scanner's thread — which then tried `int()` on a
+    session UUID and killed the scan pass. A cursor has its own result set. Taking the write lock
+    instead would work but would stall every OTLP/JSONL flush for the length of this scan.
     """
-    rows = writer._conn.execute(
-        "SELECT DISTINCT session_id FROM events WHERE session_id IS NOT NULL"
-    ).fetchall()
+    with closing(writer.cursor()) as cursor:
+        rows = cursor.execute(
+            "SELECT DISTINCT session_id FROM events WHERE session_id IS NOT NULL"
+        ).fetchall()
     return {row[0] for row in rows}
 
 

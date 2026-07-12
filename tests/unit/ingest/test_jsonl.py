@@ -164,6 +164,30 @@ def test_cursor_persists_byte_offset_per_file(
     assert int(cursor) == path.stat().st_size
 
 
+def test_a_corrupt_non_integer_cursor_rescans_the_file_instead_of_crashing(
+    projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
+) -> None:
+    """A GUARD, not the fix for OQ-06.
+
+    The shared-connection race (see tests/unit/store/test_writer_concurrency.py) is what actually
+    put a session UUID where a byte offset belonged and killed the scan pass with
+    `ValueError: invalid literal for int() with base 10: 'f18ed300-...'`. That is fixed by locking
+    the cursor accessors. This guard only covers a genuinely corrupt `ingest_cursors` row — a
+    hand-edited DB, a restored snapshot, a future schema change — and it is safe to rescan because
+    the flush anti-joins on `event_id`, so re-ingest writes zero duplicate rows.
+    """
+    path = copy_fixture("completed_session.jsonl", projects_dir / "proj-a")
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        writer.set_cursor("jsonl", str(path), "f18ed300-bc85-4b9f-918f-845d4bc5140c")
+
+        stats = scan_once(projects_dir, writer)  # must not raise
+        writer.flush()
+
+        assert stats.events_written > 0, "a corrupt cursor should rescan the file from byte 0"
+        assert writer.get_cursor("jsonl", str(path)) == str(path.stat().st_size)
+
+
 def test_truncated_file_resets_cursor_safely(
     projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
 ) -> None:

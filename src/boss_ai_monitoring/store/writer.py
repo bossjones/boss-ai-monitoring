@@ -61,10 +61,10 @@ class EventWriter:
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
 
-        self._conn = duckdb.connect(str(self._db_path))
-        ensure_schema(self._conn)
-        load_views(self._conn)
-        self._conn.execute(
+        self.__conn = duckdb.connect(str(self._db_path))
+        ensure_schema(self.__conn)
+        load_views(self.__conn)
+        self.__conn.execute(
             f"CREATE TEMP TABLE {_STAGING_TABLE} AS SELECT * FROM events WHERE FALSE"
         )
 
@@ -119,23 +119,23 @@ class EventWriter:
             deduped[row[0]] = row  # last write in the batch wins
         rows = list(deduped.values())
 
-        self._conn.execute("BEGIN TRANSACTION")
+        self.__conn.execute("BEGIN TRANSACTION")
         try:
-            self._conn.execute(f"DELETE FROM {_STAGING_TABLE}")
-            self._conn.executemany(
+            self.__conn.execute(f"DELETE FROM {_STAGING_TABLE}")
+            self.__conn.executemany(
                 f"INSERT INTO {_STAGING_TABLE} ({_INSERT_COLUMNS_SQL}) "
                 f"VALUES ({_INSERT_PLACEHOLDERS_SQL})",
                 rows,
             )
-            before = _count_events(self._conn)
-            self._conn.execute(
+            before = _count_events(self.__conn)
+            self.__conn.execute(
                 f"INSERT INTO events SELECT s.* FROM {_STAGING_TABLE} s "
                 "WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.event_id = s.event_id)"
             )
-            after = _count_events(self._conn)
-            self._conn.execute("COMMIT")
+            after = _count_events(self.__conn)
+            self.__conn.execute("COMMIT")
         except Exception:
-            self._conn.execute("ROLLBACK")
+            self.__conn.execute("ROLLBACK")
             raise
         return after - before
 
@@ -165,25 +165,25 @@ class EventWriter:
                 self._last_flush = time.monotonic()
                 self._flush_batch(batch)
 
-            source_db = self._conn.execute("SELECT current_database()").fetchone()
+            source_db = self.__conn.execute("SELECT current_database()").fetchone()
             if source_db is None:  # pragma: no cover - DuckDB always answers this
                 raise RuntimeError("could not resolve the current database name")
 
             # ATTACH takes no bound parameters (DuckDB parser error at `?`), so the path has to
             # be a literal — escape any single quote rather than concatenate it in raw.
             dest_literal = str(dest).replace("'", "''")
-            self._conn.execute(f"ATTACH '{dest_literal}' AS bam_snapshot")
+            self.__conn.execute(f"ATTACH '{dest_literal}' AS bam_snapshot")
             try:
                 # Identifiers can't be bound as parameters, and both sides are our own names
                 # (the attach alias is a literal; the source is DuckDB's own current_database()).
-                self._conn.execute(f'COPY FROM DATABASE "{source_db[0]}" TO bam_snapshot')
+                self.__conn.execute(f'COPY FROM DATABASE "{source_db[0]}" TO bam_snapshot')
             finally:
-                self._conn.execute("DETACH bam_snapshot")
+                self.__conn.execute("DETACH bam_snapshot")
         return dest
 
     def close(self) -> None:
         self.flush()
-        self._conn.close()
+        self.__conn.close()
         # Evict self from the get_writer() registry so a stale, closed connection can't be
         # handed out by connect_read_only()'s writer-aware cursor() path (OQ-04) — a later
         # get_writer()/connect_read_only() call for this path opens a fresh one instead.
@@ -192,22 +192,48 @@ class EventWriter:
             for key in stale_keys:
                 del _writers[key]
 
+    def cursor(self) -> duckdb.DuckDBPyConnection:
+        """An INDEPENDENT read handle on this writer's connection. For READS only.
+
+        This is the ONLY supported way for another module to read through the writer. The
+        connection is name-mangled private because sharing it is what caused OQ-06: DuckDB parks
+        the pending result ON the connection object, so `execute()` + `fetchone()` is not atomic —
+        a second `execute()` from another thread in between makes the first caller's `fetchone()`
+        return the SECOND query's rows. A cursor has its own result set and cannot be poisoned
+        that way.
+
+        Deliberately takes NO lock. A cursor sees committed rows only (MVCC) and is never blocked
+        by, nor blocks, an in-flight flush — so a full-table scan through it cannot stall the
+        ingest pipeline the way putting it on the write lock would. Caller owns closing it.
+        """
+        cursor = self.__conn.cursor()
+        pin_utc(cursor)  # a cursor has its own session settings, not inherited from the parent
+        return cursor
+
     # cursors — the ingest panes' resume points (ingest_cursors table)
+    #
+    # Both take ``self._lock`` for the WHOLE execute+fetch round-trip, for the same reason
+    # ``flush()`` does (OQ-02/OQ-06). These run on the jsonl scanner's worker thread
+    # (``scan_once`` via ``asyncio.to_thread``) while otlp and langsmith drive the same
+    # connection — unlocked, ``get_cursor`` was observed returning another query's row (a bare
+    # session UUID, or None), which crashed the scan pass or silently rewound a file's offset.
     def get_cursor(self, source: str, key: str) -> str | None:
-        result = self._conn.execute(
-            "SELECT cursor FROM ingest_cursors WHERE source = ? AND key = ?", [source, key]
-        ).fetchone()
+        with self._lock:
+            result = self.__conn.execute(
+                "SELECT cursor FROM ingest_cursors WHERE source = ? AND key = ?", [source, key]
+            ).fetchone()
         return result[0] if result else None
 
     def set_cursor(self, source: str, key: str, cursor: str) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO ingest_cursors (source, key, cursor, updated_at)
-            VALUES (?, ?, ?, now())
-            ON CONFLICT (source, key) DO UPDATE SET cursor = excluded.cursor, updated_at = now()
-            """,
-            [source, key, cursor],
-        )
+        with self._lock:
+            self.__conn.execute(
+                """
+                INSERT INTO ingest_cursors (source, key, cursor, updated_at)
+                VALUES (?, ?, ?, now())
+                ON CONFLICT (source, key) DO UPDATE SET cursor = excluded.cursor, updated_at = now()
+                """,
+                [source, key, cursor],
+            )
 
 
 _writers: dict[str, EventWriter] = {}
@@ -268,9 +294,7 @@ def connect_read_only(db_path: Path) -> duckdb.DuckDBPyConnection:
             # Hold the lock across the cursor() call too, not just the lookup: close() also
             # takes _writers_lock to evict itself, so this can't hand out a cursor on a
             # connection that's mid-close.
-            cursor = writer._conn.cursor()
-            pin_utc(cursor)  # a cursor has its own session settings, not inherited from parent
-            return cursor
+            return writer.cursor()
     conn = duckdb.connect(str(db_path), read_only=True)
     pin_utc(conn)
     return conn

@@ -254,6 +254,28 @@ class ScanStats:
     events_written: int = 0
 
 
+def _parse_offset(cursor_raw: str | None, cursor_key: str) -> int:
+    """The persisted byte offset for one transcript, or 0 to rescan it from the start.
+
+    A GUARD, not a fix. The one time this fired in production the cursor held a session UUID, and
+    the cause was a race on the writer's shared connection, not a bad row — fixed in
+    ``store/writer.py``. Rescanning is safe (the flush anti-joins on ``event_id``, so a re-read
+    writes no duplicates) but it is NOT free, so this warns loudly rather than swallowing it: a
+    silent rewind to 0 every pass would look exactly like "ingest is fine, just slow".
+    """
+    if cursor_raw is None:
+        return 0
+    try:
+        return int(cursor_raw)
+    except ValueError:
+        logger.warning(
+            "jsonl: cursor for %s is not a byte offset (%r) — rescanning this file from 0",
+            cursor_key,
+            cursor_raw,
+        )
+        return 0
+
+
 def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
     """One incremental pass over the transcript directory.
 
@@ -269,8 +291,7 @@ def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
     for path in sorted(projects_dir.glob(DEFAULT_SCAN_GLOB)):
         stats.files_scanned += 1
         cursor_key = str(path)
-        cursor_raw = writer.get_cursor(SOURCE, cursor_key)
-        offset = int(cursor_raw) if cursor_raw is not None else 0
+        offset = _parse_offset(writer.get_cursor(SOURCE, cursor_key), cursor_key)
 
         try:
             size = path.stat().st_size
