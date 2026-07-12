@@ -33,7 +33,7 @@
   {% if overview.recent_sessions %}
   <table class="data-table">
     <thead>
-      <tr><th>Session</th><th>Started</th><th>Ended</th><th>Cost</th><th>Events</th></tr>
+      <tr><th>Session</th><th>Started</th><th>Ended</th><th>Cost</th><th>Model</th></tr>
     </thead>
     <tbody>
       {% for s in overview.recent_sessions %}
@@ -42,7 +42,7 @@
         <td>{{ s.started_at }}</td>
         <td>{{ s.ended_at }}</td>
         <td>${{ '%.2f'|format(s.cost_usd) }}</td>
-        <td>{{ s.event_count }}</td>
+        <td>{{ s.model or "—" }}</td>
       </tr>
       {% endfor %}
     </tbody>

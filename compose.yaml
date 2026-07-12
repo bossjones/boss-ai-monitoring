@@ -1,0 +1,48 @@
+# Deployment convenience — `uv run bam serve` stays the primary dev loop (justfile `dev`).
+# ONE service: the same FastAPI app serves the dashboard (:8000) and the OTLP receiver (:4318).
+#
+# FAST-LOOP DISCIPLINE (user directive): bring this up the MINIMUM number of times — once when it
+# first works, once at GATE. Never `docker compose up --build` to test a code change; that's what
+# `uv run bam serve` (with reload) is for. If this ever grows a second service, leave it running
+# in the background and point the local `uv run` app at it via BAM_* env vars instead of rebuilding
+# the app image.
+#
+# THE host.docker.internal NUANCE (the #1 reason "no events arrive"):
+# Claude Code sessions that run OUTSIDE this compose network (e.g. on the host, or in a separate
+# devcontainer/sandbox) must point their OTLP export at THIS container by a name that resolves
+# from wherever Claude Code itself is actually running — `localhost:4318` only works if Claude
+# Code is on the literal same network namespace as the published port. When Claude Code runs
+# somewhere that only sees this stack via Docker's host-gateway (its own container/sandbox, or a
+# VM-backed Docker Desktop where `localhost` isn't 1:1 with the Mac host), use:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+# `host.docker.internal` is provided automatically by Docker Desktop on macOS; the `extra_hosts`
+# entry below adds the equivalent on Linux (Docker Engine 20.10+, host-gateway support).
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000" # dashboard
+      - "4318:4318" # OTLP http/json receiver
+    environment:
+      # Binding to 0.0.0.0 INSIDE the container is required — the local-dev default
+      # (127.0.0.1, config.sample.yaml) would make published ports unreachable from the host,
+      # since Docker's port forwarding lands on the container's external interface, not loopback.
+      BAM_SERVER__DASHBOARD_BIND: 0.0.0.0
+      BAM_SERVER__OTLP_BIND: 0.0.0.0
+      BAM_STORE__DB_PATH: /data/bam.duckdb
+      BAM_INGEST__CLAUDE_PROJECTS_DIR: /claude-projects
+      # LangSmith is optional — passes through from the host shell/.env if set, absent otherwise.
+      TRACE_TO_LANGSMITH: ${TRACE_TO_LANGSMITH:-}
+      CC_LANGSMITH_API_KEY: ${CC_LANGSMITH_API_KEY:-}
+      CC_LANGSMITH_PROJECT: ${CC_LANGSMITH_PROJECT:-}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+    volumes:
+      - bam_data:/data
+      # Read-only, non-negotiable — this is the user's real Claude Code history.
+      - ${HOME}/.claude/projects:/claude-projects:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # no-op on Docker Desktop (already provided); needed on Linux
+
+volumes:
+  bam_data:

@@ -126,8 +126,12 @@ main#main {
 
 .sparkline__bar {
   flex: 1;
-  background: var(--bam-teal);
-  height: calc(max(var(--value), 0.02) * 3rem);
+  /* Cost data uses the amber accent (design-tokens.md), not teal -- teal is reserved for
+     live/healthy signals. A $0.00 day still gets a visible baseline tick (min 3px), not an
+     invisible sliver -- max() compares the scaled height against a literal pixel floor rather
+     than baking a tiny fractional minimum into --value itself. */
+  background: var(--bam-amber);
+  height: max(calc(var(--value) * 3rem), 3px);
   border-radius: 2px 2px 0 0;
 }
 
@@ -185,10 +189,20 @@ main#main {
   color: var(--bam-teal);
 }
 
+.provenance-footer__drift--alert,
+.provenance-footer__drift--error,
 .provenance-footer__drift--stale {
   color: var(--bam-coral);
 }
 
 .provenance-footer__drift--unknown {
   color: var(--bam-text-muted);
+}
+
+.provenance-footer__job--error {
+  color: var(--bam-coral);
+}
+
+.provenance-footer__job--ok {
+  color: var(--bam-teal);
 }

@@ -9,4 +9,9 @@
   <span class="provenance-footer__drift provenance-footer__drift--{{ provenance.drift_status }}">
     drift: {{ provenance.drift_status }}
   </span>
+  {% for j in provenance.job_statuses %}
+  <span class="provenance-footer__job provenance-footer__job--{{ j.status }}">
+    {{ j.name }}: {{ j.status }} ({{ j.last_run_at }})
+  </span>
+  {% endfor %}
 </footer>

@@ -1,7 +1,8 @@
-"""RED-first tests for web/queries.py — hermetic, fixture rows only, no live DB (Wave 1 SHADOW).
+"""RED-first tests for web/queries.py — hermetic, in-memory DuckDB, no real file on disk.
 
-Exercises the query layer directly against an in-memory DuckDB connection seeded by
-``tests/unit/web/conftest.py``. Does not import ``boss_ai_monitoring.store``.
+Exercises the query layer directly against store's real schema+views, seeded by
+``tests/unit/web/conftest.py`` (Wave 3: ``fixture_conn`` uses ``store.schema.ensure_schema`` /
+``load_views``, so these tests read through the SAME six views production code does).
 """
 
 from __future__ import annotations
@@ -35,6 +36,92 @@ class TestProvenanceFooter:
         assert by_source["otlp"].event_count == 2
         assert by_source["jsonl"].last_seen == datetime(2026, 7, 11, 9, 0)
         assert by_source["langsmith"].event_count == 0
+
+    def test_reports_latest_status_per_job_from_job_run_events(self, fixture_conn, insert_event):
+        """BL-05: jobs' trailing last-run status, read from event_type='job_run' payload rows."""
+        insert_event(
+            fixture_conn,
+            event_id="j1",
+            event_type="job_run",
+            ts=datetime(2026, 7, 11, 9, 0),
+            payload='{"name": "drift_check", "status": "ok"}',
+        )
+        insert_event(
+            fixture_conn,
+            event_id="j2",
+            event_type="job_run",
+            ts=datetime(2026, 7, 11, 11, 0),
+            payload='{"name": "drift_check", "status": "error"}',
+        )
+
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert len(footer.job_statuses) == 1
+        job = footer.job_statuses[0]
+        assert job.name == "drift_check"
+        assert job.status == "error"  # the later of the two rows wins
+        assert job.last_run_at == datetime(2026, 7, 11, 11, 0)
+
+    def test_drift_status_is_unknown_with_no_drift_check_row(self, fixture_conn):
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert footer.drift_status == "unknown"
+
+    def test_drift_status_is_ok_when_latest_run_clean(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="d1",
+            event_type="job_run",
+            payload='{"name": "drift_check", "status": "ok", "alert_count": 0}',
+        )
+
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert footer.drift_status == "ok"
+
+    def test_drift_status_is_alert_when_latest_run_has_alerts(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="d1",
+            event_type="job_run",
+            payload='{"name": "drift_check", "status": "ok", "alert_count": 3}',
+        )
+
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert footer.drift_status == "alert"
+
+    def test_drift_status_is_error_when_latest_run_errored(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="d1",
+            event_type="job_run",
+            payload='{"name": "drift_check", "status": "error", "alert_count": 0}',
+        )
+
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert footer.drift_status == "error"
+
+    def test_drift_status_uses_only_the_latest_drift_check_run(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="d1",
+            event_type="job_run",
+            ts=datetime(2026, 7, 11, 9, 0),
+            payload='{"name": "drift_check", "status": "error", "alert_count": 5}',
+        )
+        insert_event(
+            fixture_conn,
+            event_id="d2",
+            event_type="job_run",
+            ts=datetime(2026, 7, 11, 11, 0),
+            payload='{"name": "drift_check", "status": "ok", "alert_count": 0}',
+        )
+
+        footer = queries.get_provenance_footer(fixture_conn)
+
+        assert footer.drift_status == "ok"
 
 
 class TestOverview:
@@ -80,6 +167,7 @@ class TestOverview:
             session_id="sess-1",
             request_id="req-1",
             cost_usd=1.0,
+            ts=NOW,
         )
         insert_event(
             fixture_conn,
@@ -88,6 +176,7 @@ class TestOverview:
             session_id="sess-1",
             request_id="req-1",
             cost_usd=1.0,
+            ts=NOW,
         )
 
         overview = queries.get_overview(fixture_conn, now=NOW)
@@ -102,6 +191,7 @@ class TestOverview:
             session_id="sess-2",
             request_id="req-2",
             cost_usd=0.42,
+            ts=NOW,
         )
 
         overview = queries.get_overview(fixture_conn, now=NOW)
@@ -121,9 +211,15 @@ class TestOverview:
         assert overview.active_sessions == 1
 
     def test_tool_success_rate_from_tool_result_events(self, fixture_conn, insert_event):
-        insert_event(fixture_conn, event_id="e1", event_type="tool_result", success=True)
-        insert_event(fixture_conn, event_id="e2", event_type="tool_result", success=True)
-        insert_event(fixture_conn, event_id="e3", event_type="tool_result", success=False)
+        insert_event(
+            fixture_conn, event_id="e1", event_type="tool_result", tool_name="Bash", success=True
+        )
+        insert_event(
+            fixture_conn, event_id="e2", event_type="tool_result", tool_name="Bash", success=True
+        )
+        insert_event(
+            fixture_conn, event_id="e3", event_type="tool_result", tool_name="Bash", success=False
+        )
 
         overview = queries.get_overview(fixture_conn, now=NOW)
 

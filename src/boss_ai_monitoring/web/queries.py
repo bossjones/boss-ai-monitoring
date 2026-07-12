@@ -1,13 +1,15 @@
 """Read-only query layer backing every dashboard panel.
 
-Wave 1 SHADOW: queries against the raw ``events`` table directly (the canonical envelope from
-``specs/boss-ai-monitoring/briefs/shared.md``, BL-01) rather than store's SQL views, because the
-views' exact column shapes are not yet published and web must not block on store's GREEN. The
-jsonl/otlp cost dedupe below is a Wave 1 stand-in for the real logic store's ``v_costs_daily`` view
-owns (G6) — Wave 3 may replace these bodies with view reads once they land; the dataclass shapes
-here are the stable contract templates/app.py render against.
+Wave 3: reads through store's six published views (``v_sessions``, ``v_tasks``,
+``v_costs_daily``, ``v_tool_stats``, ``v_attribution``, ``v_five_metrics``) plus the helper view
+``v_cost_events`` (the G6 jsonl/otlp dedupe, reused rather than reimplemented). A few fields no
+view covers (live event feed, per-source freshness, per-prompt agent/skill + tool success/fail
+split, the "no prompt_id" task bucket) are read directly off ``events`` -- none of that duplicates
+a view's aggregation logic, it only supplements what the views don't expose.
 
-Every function takes a read-only DuckDB connection; nobody here opens one (see web/app.py).
+Every function accepts ``conn: duckdb.DuckDBPyConnection | None``. ``None`` means the DuckDB file
+doesn't exist yet (no writer has flushed a first batch) -- web never creates it (G5: read-only,
+period), so every function degrades to its empty-state shape instead of touching duckdb at all.
 """
 
 from __future__ import annotations
@@ -24,21 +26,6 @@ _RECENT_SESSIONS_LIMIT = 10
 _RECENT_EVENTS_LIMIT = 50
 _SPARKLINE_DAYS = 14
 
-# A jsonl row's cost is an estimate; excluded whenever an otlp row exists for the same
-# (session_id, request_id) (G6). Reused by every cost aggregation below.
-_NON_DUPLICATE_JSONL_CLAUSE = """
-    NOT (
-        source = 'jsonl'
-        AND request_id IS NOT NULL
-        AND EXISTS (
-            SELECT 1 FROM events o
-            WHERE o.source = 'otlp'
-              AND o.session_id = events.session_id
-              AND o.request_id = events.request_id
-        )
-    )
-"""
-
 
 @dataclass(frozen=True)
 class SourceFreshness:
@@ -48,13 +35,26 @@ class SourceFreshness:
 
 
 @dataclass(frozen=True)
+class JobStatus:
+    """BL-05: ⚙️ jobs' trailing-job last-run status, surfaced in the provenance footer.
+
+    Read from ``events`` rows with ``event_type = 'job_run'`` (payload carries name/status) --
+    no schema change needed. Empty until jobs' Wave 3 persistence lands; renders as "no data".
+    """
+
+    name: str
+    status: str
+    last_run_at: datetime
+
+
+@dataclass(frozen=True)
 class ProvenanceFooter:
-    """Source lineage + freshness + drift badge, rendered on every panel."""
+    """Source lineage + freshness + drift badge + jobs' last-run status, on every panel."""
 
     sources: list[SourceFreshness]
-    # Wave 1: always "unknown" -- ⚙️ jobs owns the drift-check query/shape (BL); web wires the
-    # rendering once that lands.
+    # ⚙️ jobs owns the drift-check query; "unknown" until that lands (BL-05 sibling item).
     drift_status: str
+    job_statuses: list[JobStatus]
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ class SessionSummary:
     started_at: datetime
     ended_at: datetime
     cost_usd: float
-    event_count: int
+    model: str | None
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,8 @@ class TaskRow:
     tool_calls_fail: int
     agent_name: str | None
     skill_name: str | None
-    # TODO(Wave 3): best-effort session_id<->thread_id join against LangSmith (shared.md RISK #2).
+    # TODO(follow-up): best-effort session_id<->thread_id join against LangSmith
+    # (shared.md RISK #2).
     langsmith_url: str | None
 
 
@@ -152,14 +153,30 @@ class AttributionRow:
 
 
 @dataclass(frozen=True)
+class FiveMetrics:
+    """v_five_metrics as a typed row -- "the 5 metrics that matter" (shared.md)."""
+
+    task_completion_rate: float | None
+    tool_selection_accuracy: float | None
+    autonomy_score: float | None
+    recovery_rate: float | None
+    cost_per_successful_task: float | None
+
+
+@dataclass(frozen=True)
 class CostsData:
     daily: list[DailyCost]
     weekly: list[WeeklyCost]
     attribution: list[AttributionRow]
+    five_metrics: FiveMetrics | None
     provenance: ProvenanceFooter
 
 
-def get_provenance_footer(conn: duckdb.DuckDBPyConnection) -> ProvenanceFooter:
+def get_provenance_footer(conn: duckdb.DuckDBPyConnection | None) -> ProvenanceFooter:
+    if conn is None:
+        empty_sources = [SourceFreshness(source=s, last_seen=None, event_count=0) for s in SOURCES]
+        return ProvenanceFooter(sources=empty_sources, drift_status="unknown", job_statuses=[])
+
     rows = conn.execute("SELECT source, MAX(ts), COUNT(*) FROM events GROUP BY source").fetchall()
     by_source = {r[0]: (r[1], r[2]) for r in rows}
     sources = [
@@ -170,56 +187,106 @@ def get_provenance_footer(conn: duckdb.DuckDBPyConnection) -> ProvenanceFooter:
         )
         for source in SOURCES
     ]
-    return ProvenanceFooter(sources=sources, drift_status="unknown")
+
+    job_rows = conn.execute(
+        """
+        SELECT
+            json_extract_string(payload, '$.name') AS job_name,
+            json_extract_string(payload, '$.status') AS status,
+            ts
+        FROM events
+        WHERE event_type = 'job_run'
+        QUALIFY row_number() OVER (PARTITION BY job_name ORDER BY ts DESC) = 1
+        """
+    ).fetchall()
+    job_statuses = [JobStatus(name=r[0], status=r[1], last_run_at=r[2]) for r in job_rows if r[0]]
+
+    # BL-08: drift_check's latest run carries alert_count (int) alongside status.
+    drift_row = conn.execute(
+        """
+        SELECT
+            json_extract_string(payload, '$.status') AS status,
+            CAST(json_extract(payload, '$.alert_count') AS INTEGER) AS alert_count
+        FROM events
+        WHERE event_type = 'job_run' AND json_extract_string(payload, '$.name') = 'drift_check'
+        QUALIFY row_number() OVER (ORDER BY ts DESC) = 1
+        """
+    ).fetchone()
+    assert drift_row is not None
+    drift_status_value, alert_count = drift_row
+    if drift_status_value is None:
+        # QUALIFY row_number() = 1 over zero matching rows still yields one (NULL, NULL) row
+        # (a duckdb quirk with unpartitioned window functions), not zero rows.
+        drift_status = "unknown"
+    else:
+        if alert_count and alert_count > 0:
+            drift_status = "alert"
+        elif drift_status_value == "error":
+            drift_status = "error"
+        else:
+            drift_status = "ok"
+
+    return ProvenanceFooter(sources=sources, drift_status=drift_status, job_statuses=job_statuses)
 
 
-def get_overview(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> OverviewData:
+def get_overview(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> OverviewData:
+    if conn is None:
+        return OverviewData(
+            today_cost_usd=0.0,
+            tokens_input=0,
+            tokens_output=0,
+            tokens_cache_read=0,
+            tokens_cache_creation=0,
+            active_sessions=0,
+            tool_success_rate=None,
+            sparkline=[
+                DailyCost(day=now.date() - timedelta(days=i), cost_usd=0.0)
+                for i in range(_SPARKLINE_DAYS - 1, -1, -1)
+            ],
+            recent_sessions=[],
+            provenance=get_provenance_footer(conn),
+        )
+
     today = now.date()
 
-    cost_row = conn.execute(
-        f"""
+    cost_row = conn.execute("SELECT cost_usd FROM v_costs_daily WHERE day = ?", [today]).fetchone()
+    today_cost = cost_row[0] if cost_row else 0.0
+
+    # Tokens have no dedicated view (v_costs_daily only rolls up cost). G6's jsonl/otlp dedupe is
+    # defined for cost_usd specifically -- summing raw tokens for the day is not reimplementing any
+    # view's logic, just filling a gap none of the six cover.
+    tokens_row = conn.execute(
+        """
         SELECT
-            COALESCE(SUM(cost_usd), 0.0),
             COALESCE(SUM(tokens_input), 0),
             COALESCE(SUM(tokens_output), 0),
             COALESCE(SUM(tokens_cache_read), 0),
             COALESCE(SUM(tokens_cache_creation), 0)
         FROM events
-        WHERE CAST(ts AS DATE) = ? AND {_NON_DUPLICATE_JSONL_CLAUSE}
+        WHERE CAST(ts AS DATE) = ?
         """,
         [today],
     ).fetchone()
-    assert cost_row is not None
-    today_cost, tokens_in, tokens_out, tokens_cache_read, tokens_cache_creation = cost_row
+    assert tokens_row is not None
+    tokens_in, tokens_out, tokens_cache_read, tokens_cache_creation = tokens_row
 
     active_cutoff = now - timedelta(minutes=_ACTIVE_WINDOW_MINUTES)
     active_row = conn.execute(
-        "SELECT COUNT(DISTINCT session_id) FROM events WHERE session_id IS NOT NULL AND ts >= ?",
-        [active_cutoff],
+        "SELECT COUNT(*) FROM v_sessions WHERE ended_at >= ?", [active_cutoff]
     ).fetchone()
     assert active_row is not None
     active_sessions = active_row[0]
 
     tool_row = conn.execute(
-        """
-        SELECT COUNT(*) FILTER (WHERE success), COUNT(*)
-        FROM events
-        WHERE event_type = 'tool_result'
-        """
+        "SELECT SUM(call_count), SUM(success_count) FROM v_tool_stats"
     ).fetchone()
     assert tool_row is not None
-    tool_ok, tool_total = tool_row
-    tool_success_rate = (tool_ok / tool_total) if tool_total else None
+    total_calls, ok_calls = tool_row
+    tool_success_rate = (ok_calls / total_calls) if total_calls else None
 
     sparkline_start = today - timedelta(days=_SPARKLINE_DAYS - 1)
     sparkline_rows = conn.execute(
-        f"""
-        SELECT CAST(ts AS DATE) AS day, COALESCE(SUM(cost_usd), 0.0)
-        FROM events
-        WHERE ts >= ? AND {_NON_DUPLICATE_JSONL_CLAUSE}
-        GROUP BY day
-        """,
-        [sparkline_start],
+        "SELECT day, cost_usd FROM v_costs_daily WHERE day >= ?", [sparkline_start]
     ).fetchall()
     by_day = dict(sparkline_rows)
     sparkline = [
@@ -232,19 +299,15 @@ def get_overview(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> OverviewD
 
     session_rows = conn.execute(
         """
-        SELECT session_id, MIN(ts), MAX(ts), COALESCE(SUM(cost_usd), 0.0), COUNT(*)
-        FROM events
-        WHERE session_id IS NOT NULL
-        GROUP BY session_id
-        ORDER BY MAX(ts) DESC
+        SELECT session_id, started_at, ended_at, cost_usd, model
+        FROM v_sessions
+        ORDER BY ended_at DESC
         LIMIT ?
         """,
         [_RECENT_SESSIONS_LIMIT],
     ).fetchall()
     recent_sessions = [
-        SessionSummary(
-            session_id=r[0], started_at=r[1], ended_at=r[2], cost_usd=r[3], event_count=r[4]
-        )
+        SessionSummary(session_id=r[0], started_at=r[1], ended_at=r[2], cost_usd=r[3], model=r[4])
         for r in session_rows
     ]
 
@@ -262,7 +325,12 @@ def get_overview(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> OverviewD
     )
 
 
-def get_live(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> LiveData:
+def get_live(conn: duckdb.DuckDBPyConnection | None, *, now: datetime) -> LiveData:
+    if conn is None:
+        return LiveData(
+            recent_events=[], active_sessions=[], provenance=get_provenance_footer(conn)
+        )
+
     event_rows = conn.execute(
         """
         SELECT event_id, ts, source, event_type, session_id, tool_name, cost_usd
@@ -288,11 +356,10 @@ def get_live(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> LiveData:
     cutoff = now - timedelta(minutes=_ACTIVE_WINDOW_MINUTES)
     session_rows = conn.execute(
         """
-        SELECT session_id, MIN(ts), MAX(ts), COALESCE(SUM(cost_usd), 0.0)
-        FROM events
-        WHERE session_id IS NOT NULL AND ts >= ?
-        GROUP BY session_id
-        ORDER BY MAX(ts) DESC
+        SELECT session_id, started_at, ended_at, cost_usd, duration_ms
+        FROM v_sessions
+        WHERE ended_at >= ?
+        ORDER BY ended_at DESC
         """,
         [cutoff],
     ).fetchall()
@@ -302,7 +369,7 @@ def get_live(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> LiveData:
             started_at=r[1],
             last_event_at=r[2],
             running_cost_usd=r[3],
-            running_duration_ms=int((r[2] - r[1]).total_seconds() * 1000),
+            running_duration_ms=r[4],
         )
         for r in session_rows
     ]
@@ -314,7 +381,12 @@ def get_live(conn: duckdb.DuckDBPyConnection, *, now: datetime) -> LiveData:
     )
 
 
-def get_session_detail(conn: duckdb.DuckDBPyConnection, session_id: str) -> SessionDetail | None:
+def get_session_detail(
+    conn: duckdb.DuckDBPyConnection | None, session_id: str
+) -> SessionDetail | None:
+    if conn is None:
+        return None
+
     exists = conn.execute(
         "SELECT 1 FROM events WHERE session_id = ? LIMIT 1", [session_id]
     ).fetchone()
@@ -323,10 +395,56 @@ def get_session_detail(conn: duckdb.DuckDBPyConnection, session_id: str) -> Sess
 
     task_rows = conn.execute(
         """
+        SELECT prompt_id, started_at, ended_at, duration_ms, cost_usd, tokens_input, tokens_output
+        FROM v_tasks
+        WHERE session_id = ?
+        ORDER BY started_at
+        """,
+        [session_id],
+    ).fetchall()
+
+    # v_tasks has no agent/skill attribution or tool success/fail split -- supplement per prompt_id
+    # from the raw events (not a duplicate of v_tasks' cost/duration/token aggregation).
+    enrich_rows = conn.execute(
+        """
         SELECT
             prompt_id,
-            MIN(ts),
-            MAX(ts),
+            COUNT(*) FILTER (WHERE event_type = 'tool_result' AND success),
+            COUNT(*) FILTER (WHERE event_type = 'tool_result' AND NOT success),
+            MAX(agent_name),
+            MAX(skill_name)
+        FROM events
+        WHERE session_id = ? AND prompt_id IS NOT NULL
+        GROUP BY prompt_id
+        """,
+        [session_id],
+    ).fetchall()
+    enrich = {r[0]: r[1:] for r in enrich_rows}
+
+    tasks = [
+        TaskRow(
+            prompt_id=r[0],
+            start_ts=r[1],
+            end_ts=r[2],
+            duration_ms=r[3],
+            cost_usd=r[4],
+            tokens_input=r[5],
+            tokens_output=r[6],
+            tool_calls_ok=enrich.get(r[0], (0, 0, None, None))[0],
+            tool_calls_fail=enrich.get(r[0], (0, 0, None, None))[1],
+            agent_name=enrich.get(r[0], (0, 0, None, None))[2],
+            skill_name=enrich.get(r[0], (0, 0, None, None))[3],
+            langsmith_url=None,
+        )
+        for r in task_rows
+    ]
+
+    # v_tasks filters to prompt_id IS NOT NULL -- sessions with no-prompt_id events (compaction,
+    # etc.) need their own bucket read straight off events, per Phase 6's required edge case.
+    ungrouped = conn.execute(
+        """
+        SELECT
+            MIN(ts), MAX(ts),
             COALESCE(SUM(cost_usd), 0.0),
             COALESCE(SUM(tokens_input), 0),
             COALESCE(SUM(tokens_output), 0),
@@ -335,50 +453,67 @@ def get_session_detail(conn: duckdb.DuckDBPyConnection, session_id: str) -> Sess
             MAX(agent_name),
             MAX(skill_name)
         FROM events
-        WHERE session_id = ?
-        GROUP BY prompt_id
-        ORDER BY MIN(ts)
+        WHERE session_id = ? AND prompt_id IS NULL
         """,
         [session_id],
-    ).fetchall()
-    tasks = [
-        TaskRow(
-            prompt_id=r[0],
-            start_ts=r[1],
-            end_ts=r[2],
-            duration_ms=int((r[2] - r[1]).total_seconds() * 1000),
-            cost_usd=r[3],
-            tokens_input=r[4],
-            tokens_output=r[5],
-            tool_calls_ok=r[6],
-            tool_calls_fail=r[7],
-            agent_name=r[8],
-            skill_name=r[9],
-            langsmith_url=None,
+    ).fetchone()
+    assert ungrouped is not None
+    if ungrouped[0] is not None:
+        start, end, cost, tin, tout, ok, fail, agent, skill = ungrouped
+        tasks.append(
+            TaskRow(
+                prompt_id=None,
+                start_ts=start,
+                end_ts=end,
+                duration_ms=int((end - start).total_seconds() * 1000),
+                cost_usd=cost,
+                tokens_input=tin,
+                tokens_output=tout,
+                tool_calls_ok=ok,
+                tool_calls_fail=fail,
+                agent_name=agent,
+                skill_name=skill,
+                langsmith_url=None,
+            )
         )
-        for r in task_rows
-    ]
+        tasks.sort(key=lambda t: t.start_ts)
 
     return SessionDetail(session_id=session_id, tasks=tasks, provenance=get_provenance_footer(conn))
 
 
-def get_costs(conn: duckdb.DuckDBPyConnection) -> CostsData:
-    daily_rows = conn.execute(
-        f"""
-        SELECT CAST(ts AS DATE) AS day, COALESCE(SUM(cost_usd), 0.0)
-        FROM events
-        WHERE {_NON_DUPLICATE_JSONL_CLAUSE}
-        GROUP BY day
-        ORDER BY day
+def get_five_metrics(conn: duckdb.DuckDBPyConnection | None) -> FiveMetrics | None:
+    if conn is None:
+        return None
+    row = conn.execute(
         """
-    ).fetchall()
+        SELECT
+            task_completion_rate, tool_selection_accuracy, autonomy_score,
+            recovery_rate, cost_per_successful_task
+        FROM v_five_metrics
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return FiveMetrics(*row)
+
+
+def get_costs(conn: duckdb.DuckDBPyConnection | None) -> CostsData:
+    if conn is None:
+        return CostsData(
+            daily=[],
+            weekly=[],
+            attribution=[],
+            five_metrics=None,
+            provenance=get_provenance_footer(conn),
+        )
+
+    daily_rows = conn.execute("SELECT day, cost_usd FROM v_costs_daily ORDER BY day").fetchall()
     daily = [DailyCost(day=r[0], cost_usd=r[1]) for r in daily_rows]
 
     weekly_rows = conn.execute(
-        f"""
-        SELECT CAST(DATE_TRUNC('week', ts) AS DATE) AS week_start, COALESCE(SUM(cost_usd), 0.0)
-        FROM events
-        WHERE {_NON_DUPLICATE_JSONL_CLAUSE}
+        """
+        SELECT CAST(DATE_TRUNC('week', day) AS DATE) AS week_start, SUM(cost_usd)
+        FROM v_costs_daily
         GROUP BY week_start
         ORDER BY week_start
         """
@@ -386,17 +521,12 @@ def get_costs(conn: duckdb.DuckDBPyConnection) -> CostsData:
     weekly = [WeeklyCost(week_start=r[0], cost_usd=r[1]) for r in weekly_rows]
 
     attribution: list[AttributionRow] = []
-    for dimension, column in (
-        ("model", "model"),
-        ("agent", "agent_name"),
-        ("skill", "skill_name"),
-        ("project", "cwd"),
-    ):
+    for dimension, column in (("model", "model"), ("agent", "agent_name"), ("skill", "skill_name")):
         rows = conn.execute(
             f"""
-            SELECT {column}, COALESCE(SUM(cost_usd), 0.0), COUNT(*)
-            FROM events
-            WHERE {column} IS NOT NULL AND {_NON_DUPLICATE_JSONL_CLAUSE}
+            SELECT {column}, SUM(cost_usd), SUM(event_count)
+            FROM v_attribution
+            WHERE {column} IS NOT NULL
             GROUP BY {column}
             ORDER BY 2 DESC
             """
@@ -406,6 +536,26 @@ def get_costs(conn: duckdb.DuckDBPyConnection) -> CostsData:
             for r in rows
         )
 
+    # v_attribution has no project/cwd dimension -- v_cost_events (store's G6 dedupe helper view,
+    # already published in views.sql) supplies it without reimplementing that dedupe ourselves.
+    project_rows = conn.execute(
+        """
+        SELECT cwd, SUM(cost_usd), COUNT(*)
+        FROM v_cost_events
+        WHERE cwd IS NOT NULL
+        GROUP BY cwd
+        ORDER BY 2 DESC
+        """
+    ).fetchall()
+    attribution.extend(
+        AttributionRow(dimension="project", key=r[0], cost_usd=r[1], event_count=r[2])
+        for r in project_rows
+    )
+
     return CostsData(
-        daily=daily, weekly=weekly, attribution=attribution, provenance=get_provenance_footer(conn)
+        daily=daily,
+        weekly=weekly,
+        attribution=attribution,
+        five_metrics=get_five_metrics(conn),
+        provenance=get_provenance_footer(conn),
     )

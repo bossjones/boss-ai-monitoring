@@ -1,15 +1,20 @@
 """RED-first tests for web/app.py — create_app(settings) -> FastAPI (BL-02 contract).
 
-Wave 1 SHADOW: hermetic. Data comes from `app.dependency_overrides[get_connection]` pointed at an
-in-memory DuckDB fixture connection (see conftest.py) — never a live store import, never a real
-DuckDB file on disk.
+Wave 3: route/JSON/fragment tests stay hermetic via `app.dependency_overrides[get_connection]`
+pointed at an in-memory fixture connection seeded through store's real schema+views
+(conftest.py). `_poll_events` (the SSE polling loop) is tested directly against a real tmp DuckDB
+file written by `store.writer.EventWriter` -- a live `TestClient` stream never signals disconnect
+for an endpoint that polls forever, so route-level streaming is left to the Playwright e2e test
+(tests/e2e/test_dashboard.py) which boots a real server.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
-from boss_ai_monitoring.web.app import create_app, get_connection
+from boss_ai_monitoring.web.app import _poll_events, create_app, get_connection
 
 
 @pytest.fixture
@@ -40,6 +45,29 @@ class TestContract:
         source = inspect.getsource(app_module)
 
         assert "# otlp-mount" in source
+
+    def test_otlp_router_is_mounted(self, settings, client_factory):
+        app = create_app(settings)
+        client = client_factory(app)
+
+        response = client.post("/v1/logs", json={})
+
+        assert response.status_code == 200, "a 404 here means the otlp-mount region is empty"
+
+
+class TestMissingDbFile:
+    """No writer has flushed a first batch yet -- web must never create the file (G5)."""
+
+    def test_overview_renders_empty_state_without_touching_duckdb(self, settings, client_factory):
+        assert not settings.store.db_path.exists()
+        app = create_app(settings)
+        client = client_factory(app)
+
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert "No sessions yet" in response.text
+        assert not settings.store.db_path.exists(), "web must never create the DB file"
 
 
 class TestOverviewRoute:
@@ -157,9 +185,67 @@ class TestCostsRoute:
         assert any(row["dimension"] == "model" for row in body["attribution"])
 
 
-class TestEventsStream:
-    def test_stream_endpoint_returns_event_stream_content_type(self, client):
-        response = client.get("/api/events/stream")
+class _FakeRequest:
+    """Drives `_poll_events`'s disconnect check deterministically -- no real ASGI cycle."""
 
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers["content-type"]
+    def __init__(self, disconnect_after_calls: int) -> None:
+        self._calls = 0
+        self._disconnect_after_calls = disconnect_after_calls
+
+    async def is_disconnected(self) -> bool:
+        self._calls += 1
+        return self._calls > self._disconnect_after_calls
+
+
+class TestPollEvents:
+    async def test_yields_nothing_when_db_file_does_not_exist(self, settings):
+        request = _FakeRequest(disconnect_after_calls=0)
+
+        events = [item async for item in _poll_events(settings, request)]
+
+        assert events == []
+
+    async def test_yields_new_rows_written_by_the_real_store(self, settings, db_path):
+        import json
+
+        from boss_ai_monitoring.store.writer import EventWriter
+
+        with EventWriter(db_path) as writer:
+            writer.write(
+                {
+                    "event_id": "e1",
+                    "ts": datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
+                    "source": "otlp",
+                    "event_type": "api_request",
+                    "session_id": "sess-1",
+                    "cost_usd": 0.5,
+                }
+            )
+
+        request = _FakeRequest(disconnect_after_calls=1)
+
+        events = [item async for item in _poll_events(settings, request)]
+
+        assert len(events) == 1
+        payload = json.loads(events[0]["data"])
+        assert payload["event_id"] == "e1"
+        assert payload["source"] == "otlp"
+
+    async def test_does_not_redeliver_rows_already_seen(self, settings, db_path):
+        from boss_ai_monitoring.store.writer import EventWriter
+
+        with EventWriter(db_path) as writer:
+            writer.write(
+                {
+                    "event_id": "e1",
+                    "ts": datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
+                    "source": "otlp",
+                    "event_type": "api_request",
+                }
+            )
+
+        request = _FakeRequest(disconnect_after_calls=2)
+
+        events = [item async for item in _poll_events(settings, request)]
+
+        assert len(events) == 1

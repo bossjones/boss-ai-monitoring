@@ -1,6 +1,6 @@
-<section class="panel" id="live-panel">
+<section class="panel" id="live-panel" hx-ext="sse" sse-connect="/api/events/stream">
   <h1>Live</h1>
-  <!-- Wave 3 TODO: hx-ext="sse" sse-connect="/api/events/stream" once ingest flush -> SSE push is wired (web.md). -->
+  <p class="empty-state" id="live-sse-ticker" sse-swap="message">Waiting for live events&hellip;</p>
 
   <h2>Active sessions</h2>
   {% if live.active_sessions %}

@@ -48,5 +48,33 @@
   <p class="empty-state">No attribution data yet.</p>
   {% endif %}
 
+  <h2>The 5 metrics that matter</h2>
+  {% if costs.five_metrics %}
+  <div class="stat-tiles">
+    <div class="stat-tile">
+      <div class="stat-tile__label">Task completion rate</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.task_completion_rate is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.task_completion_rate * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Tool selection accuracy</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.tool_selection_accuracy is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.tool_selection_accuracy * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Autonomy score</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.autonomy_score is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.autonomy_score * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Recovery rate</div>
+      <div class="stat-tile__value">{% if costs.five_metrics.recovery_rate is none %}—{% else %}{{ "%.0f"|format(costs.five_metrics.recovery_rate * 100) }}%{% endif %}</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-tile__label">Cost / successful task</div>
+      <div class="stat-tile__value stat-tile__value--cost">{% if costs.five_metrics.cost_per_successful_task is none %}—{% else %}${{ "%.2f"|format(costs.five_metrics.cost_per_successful_task) }}{% endif %}</div>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty-state">No data yet.</p>
+  {% endif %}
+
   {% include "partials/provenance_footer.html" %}
 </section>

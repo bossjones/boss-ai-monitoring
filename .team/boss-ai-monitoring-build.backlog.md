@@ -292,3 +292,82 @@ appear at all). Confirmed it failed against the pre-fix view — `v_attribution`
 job_run row's `(None, None, None, 1)` bucket alongside the real one. Fix: added
 `WHERE event_type != 'job_run'` to `attributed_stats` in `store/views.sql`, exactly the one-liner
 proposed above. Re-ran: green. Full store suite (36 tests) green.
+
+---
+
+## BL-09 — `just check` UNSTABLE right now from web's in-flight Phase 7 edits (GATE pre-stage)
+Owner: 🖥 web   Requester: 🔍 validator   Status: OPEN
+What is needed: while pre-staging the GATE per lead's speed directive, `rtk proxy just check` did
+NOT match the lead's claimed "203 passed, 0 failed" — I independently observed THREE different
+failure states across four runs a few minutes apart, all inside `tests/unit/web/`:
+1. `2 failed, 206 passed` — `TestProvenanceFooter::test_empty_db_reports_no_sources_seen` and
+   `test_drift_status_is_unknown_with_no_drift_check_row` both asserted `drift_status == 'ok'`
+   instead of `'unknown'` on an empty DB (reproduced the underlying `QUALIFY` query standalone —
+   it correctly returns `(None, None)` on empty, so the bug is in how `get_provenance_footer`
+   or its test fixture composes with something else, not the SQL itself).
+2. Running `tests/unit/web/test_queries.py` in isolation moments later: `19 failed` — every test
+   using the `insert_event` fixture hit `NameError: name '_DEFAULT_ROW' is not defined` in
+   `tests/unit/web/conftest.py` (the module referenced `_DEFAULT_ROW` while the actual definition
+   was already renamed to something else mid-edit).
+3. Checked `conftest.py` again seconds later: the name had changed AGAIN, to `_STATIC_DEFAULT_ROW`
+   (both definition and usage now consistent).
+4. Re-ran full `just check`: back down to `2 failed, 206 passed`, but a DIFFERENT pair —
+   `TestOverview::test_jsonl_cost_excluded_when_matching_otlp_row_exists` and
+   `test_jsonl_cost_included_when_no_matching_otlp_row`, both asserting `today_cost_usd == 0.0`
+   instead of the expected nonzero value.
+This is clearly web actively rewriting `tests/unit/web/conftest.py` + `web/queries.py` right now
+(Phase 7), not a stable regression — three different failure signatures in ~5 minutes on the same
+two files. Per the lead's own GATE-prestage instructions I am NOT chasing this further (deferred
+until web's Phase 7 artifacts land) — but the lead's "203/0 failed, tree is GREEN" claim does NOT
+match what I observed at any point during this window, so GATE item 1/2 cannot be signed off yet.
+Please re-run `just check` once web's edits settle and ping me to re-verify.
+Why: the lead asked me to pre-stage the GATE now; I'm flagging this immediately rather than
+silently waiting or fabricating a pass, per "a described pass is a failure."
+
+---
+
+## BL-10 — Phase 9 PACKAGE shipped: notebook + Docker; ONE README correction needed
+Owner: 👑 lead (README is lead-owned)   Requester: ⚙️ jobs   Status: OPEN — one correction, rest
+already accurate
+What is needed: README.md's existing content (quickstart, architecture, LangSmith setup, privacy,
+and the Docker/marimo sections) already matches what I shipped almost exactly — no full rewrite
+needed. One factual correction, please:
+
+> Under "Exploring the data (marimo)", the line **"The notebook opens a read-only DuckDB
+> connection, so it never fights the running app's writer."** is not quite right and should read
+> something like: *"Run this with `bam serve` stopped (or against a copy of the DuckDB file) — a
+> live write connection holds an OS-level DuckDB file lock that blocks every other process's
+> connection, read-only included, so the notebook and a running `bam serve` can't have the file
+> open at the same time. This is separate from OQ-04 (which is about `web`/`jobs`, both readers
+> living inside `bam serve`'s own process)."*
+
+Full writeup + the two isolated repros (one via `docker compose exec`, one plain two-process
+`duckdb.connect()` test) are at OQ-05 in the open-questions log. I already corrected this same
+claim inside `notebooks/explore.py`'s own markdown cell — this entry is just the matching README
+fix, since I don't edit README.md myself.
+
+Everything else Phase 9 shipped, verified end-to-end (not just written):
+- `notebooks/explore.py` — day drill-down, per-session breakdown, token-class mix, tool-failure
+  explorer. No pandas/polars/pyarrow dependency (none are installed; used plain `list[dict]` +
+  `mo.ui.table`, which accepts that directly). Booted clean via
+  `uvx marimo run notebooks/explore.py --headless` against a seeded live DB (`HTTP 200`,
+  `app.run()` executes every cell without error).
+- `Dockerfile` (multi-stage, `ghcr.io/astral-sh/uv` builder -> `python:3.13-slim-bookworm`
+  runtime, non-root `bam` user) + `compose.yaml` (one service, ports 8000+4318, named volume for
+  the DuckDB file, read-only `~/.claude/projects` mount, `host.docker.internal` documented in a
+  compose.yaml comment). Built + brought up ONCE (fast-loop discipline): found and fixed a real
+  bug in that single pass — the named volume mounted over `/data` came up **root-owned**, so the
+  non-root `bam` user got `Permission denied` on `EventWriter`'s first `CREATE TABLE`; fixed by
+  creating `/data` and `chown`-ing it to `bam` in the Dockerfile *before* `USER bam` (a named
+  volume's first mount inherits whatever owner/perms already exist at that path in the image).
+  Also had to override `BAM_SERVER__DASHBOARD_BIND`/`BAM_SERVER__OTLP_BIND` to `0.0.0.0` in
+  compose.yaml's `environment:` — the local-dev default of `127.0.0.1` (config.sample.yaml) would
+  make the published ports unreachable from the host, since Docker's port-forwarding lands on the
+  container's external interface, not loopback. Re-verified after the fix: dashboard `HTTP 200`,
+  `POST /v1/logs` with the `api_request.json` fixture -> `HTTP 200` -> confirmed the row actually
+  landed in `/data/bam.duckdb` inside the volume. Container is stopped now (image + volume kept,
+  no more rebuilds needed until GATE).
+Why: proposing the one real content gap rather than a redundant full README draft, since most of
+what Phase 9 needed was already written; flagging the Docker/marimo details above so whoever signs
+off GATE's Docker acceptance step knows what was actually verified and what the one non-obvious
+fix was.

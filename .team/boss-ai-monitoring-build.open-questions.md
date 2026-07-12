@@ -356,4 +356,41 @@ DOM update, against the actual single-process `bam serve` topology) — green ev
 itself stays open for store/jobs to close on their own evidence; this is web's confirmation only.
 
 ---
+
+## OQ-05 — DuckDB's write-connection lock is exclusive CROSS-process too (marimo/Docker scope,
+not OQ-04's in-process case)
+Status: ANSWERED (self) — a real gap in the standalone-reader story, not a defect in shipped code
+Spec: jobs.md Phase 9 marimo notebook; OQ-04 (store's now-landed `.cursor()` in-process fix)
+What I tried: verified store's OQ-04 fix solves the `web`/`jobs` case (they share `bam serve`'s
+OS process with `get_writer()`'s singleton, so `.cursor()`-sharing works). Separately, while
+building the Phase 9 Docker image, I ran `docker compose exec app python -c "duckdb.connect(...,
+read_only=True)"` — a genuinely SEPARATE OS process from the running `bam serve` (PID 1) — and it
+failed: `IOException: Could not set lock on file ... Conflicting lock is held in ... (PID 1)`.
+Reproduced cleanly in isolation on the host too (no jobs/store code involved): started a plain
+`duckdb.connect(path)` write connection in one Python process, kept it open, then tried
+`duckdb.connect(path, read_only=True)` from a SECOND, independent process — same lock failure,
+every time.
+Why it matters: this is DuckDB's actual concurrency model — a read-write connection takes an
+OS-level file lock that excludes EVERY other process's connection to that file, read-only or not,
+regardless of which process opened it first. Store's `.cursor()` fix is exactly correct for
+OQ-04's in-process scope (it's the only fix that scope needs), but it cannot and does not extend
+to a genuinely separate process — that's not a Python-level connection-cache problem, it's the OS
+file lock, and no application code on either side can share a connection OBJECT across process
+boundaries. This means the marimo notebook (`notebooks/explore.py`, run via `uvx marimo run/edit`
+— always its own process) will ALWAYS hit this lock error if `bam serve` is actively running with
+a live writer, no matter what store does to `connect_read_only()`.
+My best guess / what shipped: not a defect to fix — a scope boundary to document accurately.
+Corrected `notebooks/explore.py`'s own markdown cell (previously said "safe to run alongside `bam
+serve`", which was wrong) to say: run the notebook with `bam serve` stopped, or against a copy of
+the DuckDB file, if you need both open at once. Phase 9 acceptance
+(`uvx marimo run notebooks/explore.py` opens against a live DB without errors) is satisfied and
+verified — "a live DB" there means "a DB file with real data," not "while `bam serve` is also
+running"; that's consistent with how this dispatch's own Phase 8 GO framed it ("standalone
+`marimo run` has no live writer so the plain read-only path applies").
+Cost of guessing wrong: low if the README's marimo section already matches this (it currently
+reads "so it never fights the running app's writer," which is the same overclaim I just fixed in
+the notebook itself — flagged in the Phase-9 README backlog entry for 👑 lead to correct, since
+README is lead-owned).
+
+---
 (end of current questions)

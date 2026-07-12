@@ -4,17 +4,22 @@
 object on both binds (:8000 dashboard, :4318 OTLP) — see `boss_ai_monitoring.cli.build_app`.
 Nobody outside `cli.py` wires ports.
 
-Wave 1 SHADOW: routes render against `get_connection`, a dependency tests override with a fixture
-DuckDB connection (`tests/unit/web/conftest.py`). Production wiring (opening the real store file)
-is written but unexercised until Wave 3 -- this module does not import `boss_ai_monitoring.store`.
+Wave 3: routes read through `store.connect_read_only` (LT-01 lifted the Wave 1 restriction on
+importing `boss_ai_monitoring.store`). web NEVER opens a write connection (G5) -- if the DuckDB
+file doesn't exist yet (no writer has flushed a first batch), `get_connection` yields `None` and
+every panel renders its empty state instead of touching duckdb at all. Unit tests override
+`get_connection` with a fixture connection (`tests/unit/web/conftest.py`); production wiring is
+exercised for real by `tests/e2e/test_dashboard.py`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -25,31 +30,86 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
 from boss_ai_monitoring.config import BamSettings
+from boss_ai_monitoring.store.writer import connect_read_only
 from boss_ai_monitoring.web import queries
 
 _WEB_DIR = Path(__file__).parent
 _TEMPLATES = Jinja2Templates(directory=str(_WEB_DIR / "templates"))
+
+_SSE_POLL_INTERVAL_S = 0.5
+
+
+class _DisconnectCheck(Protocol):
+    """The one bit of `Request` the poll loop needs -- lets tests drive it without a real ASGI
+    request/response cycle (a live `TestClient` stream never signals disconnect for an endpoint
+    that polls forever, so unit tests exercise this loop directly instead)."""
+
+    async def is_disconnected(self) -> bool: ...
+
+
+async def _poll_events(
+    settings: BamSettings, request: _DisconnectCheck
+) -> AsyncIterator[dict[str, str]]:
+    """Poll the read-only store for new rows and yield each as an SSE message payload.
+
+    OTel logs export every ~5s (shared.md) and nothing here holds a lock the single writer
+    needs, so a short poll loop over `connect_read_only` is realtime enough for the live feed
+    without any cross-module event bus.
+    """
+    last_ts: datetime | None = None
+    while not await request.is_disconnected():
+        if settings.store.db_path.exists():
+            conn = connect_read_only(settings.store.db_path)
+            try:
+                query = (
+                    "SELECT event_id, ts, source, event_type, session_id, tool_name, cost_usd "
+                    "FROM events"
+                )
+                params: list[object] = []
+                if last_ts is not None:
+                    query += " WHERE ts > ?"
+                    params.append(last_ts)
+                query += " ORDER BY ts ASC LIMIT 200"
+                rows = conn.execute(query, params).fetchall()
+            finally:
+                conn.close()
+            for row in rows:
+                last_ts = row[1]
+                payload = {
+                    "event_id": row[0],
+                    "ts": row[1].isoformat(),
+                    "source": row[2],
+                    "event_type": row[3],
+                    "session_id": row[4],
+                    "tool_name": row[5],
+                    "cost_usd": row[6],
+                }
+                yield {"event": "message", "data": json.dumps(payload)}
+        await asyncio.sleep(_SSE_POLL_INTERVAL_S)
 
 
 def _is_fragment_request(request: Request) -> bool:
     return request.headers.get("HX-Request") == "true"
 
 
-def get_connection(request: Request) -> Iterator[duckdb.DuckDBPyConnection]:
-    """Production data source: a read-only connection to the configured DuckDB file.
+def get_connection(request: Request) -> Iterator[duckdb.DuckDBPyConnection | None]:
+    """A read-only connection to the configured DuckDB file, or `None` if it doesn't exist yet.
 
-    Wave 1 SHADOW: not exercised by tests -- `app.dependency_overrides[get_connection]` supplies
-    a fixture connection instead. Wave 3 wires this to the live store.
+    web never creates the file (G5: read-only, period) -- the writer creates it on first flush.
+    Tests override this with `app.dependency_overrides[get_connection]`.
     """
     settings: BamSettings = request.app.state.settings
-    conn = duckdb.connect(str(settings.store.db_path), read_only=True)
+    if not settings.store.db_path.exists():
+        yield None
+        return
+    conn = connect_read_only(settings.store.db_path)
     try:
         yield conn
     finally:
         conn.close()
 
 
-Connection = Annotated[duckdb.DuckDBPyConnection, Depends(get_connection)]
+Connection = Annotated[duckdb.DuckDBPyConnection | None, Depends(get_connection)]
 
 
 def create_app(settings: BamSettings) -> FastAPI:
@@ -58,8 +118,11 @@ def create_app(settings: BamSettings) -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(_WEB_DIR / "static")), name="static")
 
     # otlp-mount
-    # 📡 otlp's `get_router() -> APIRouter` is mounted here, once the lead issues the loan ticket
-    # (web.md "The ONE recorded handoff"). Empty in Wave 1 -- do not fill this in without one.
+    # LT-01 (lead-issued loan ticket, Wave 3): mount 📡 otlp's router into the ONE app object.
+    # Scope of the loan is this mount call only -- router internals stay owned by ingest/otlp.py.
+    from boss_ai_monitoring.ingest.otlp import get_router as get_otlp_router
+
+    app.include_router(get_otlp_router())
     # otlp-mount
 
     @app.get("/", response_class=HTMLResponse)
@@ -126,10 +189,6 @@ def create_app(settings: BamSettings) -> FastAPI:
 
     @app.get("/api/events/stream")
     async def events_stream(request: Request) -> EventSourceResponse:
-        async def _events() -> AsyncIterator[dict[str, str]]:
-            # Wave 1: no live event bus yet. Wave 3 wires ingest-flush -> SSE push (web.md).
-            yield {"event": "heartbeat", "data": "waiting-for-wave-3"}
-
-        return EventSourceResponse(_events())
+        return EventSourceResponse(_poll_events(settings, request))
 
     return app

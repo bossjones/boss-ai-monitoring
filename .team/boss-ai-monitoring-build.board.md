@@ -9,7 +9,7 @@
 SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE -> DONE
 ```
 
-**Current state: INTEGRATE** (Wave 3 in flight — web Phase 6, jobs Phase 8; jsonl finishing Phase 5)
+**Current state: PACKAGE / pre-GATE** (Wave 3 in flight — web Phase 6, jobs Phase 8; jsonl finishing Phase 5)
 
 INGEST-FANOUT closed 2026-07-11: 📡 otlp Phase 3 **independently validator-verified** (raw output
 in `.validator-log.md` — red-first proven by gutting the handler, 12/24 failed; all edge cases
@@ -157,7 +157,7 @@ $ duckdb "$(uv run bam config db-path)" "SELECT 'db reachable' AS ok"
 
 ## Open questions
 
-- **OQ-04 — 🚨 SHIP-BLOCKER, OPEN, owned by 🧱 store.** Filed by ⚙️ jobs; **independently
+- **OQ-04 — ✅ CLOSED (`1c0c938`). Was a 🚨 SHIP-BLOCKER.** Filed by ⚙️ jobs; **independently
   reproduced by the lead with raw duckdb, zero project code involved.** `connect_read_only(path)`
   CANNOT coexist with a live `get_writer()` connection in the same process — duckdb refuses a
   second connection to the same file with a different configuration while one is open

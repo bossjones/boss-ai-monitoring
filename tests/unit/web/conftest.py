@@ -1,52 +1,26 @@
-"""Hermetic web-pane fixtures: an in-memory DuckDB connection seeded by hand.
+"""Hermetic web-pane fixtures: an in-memory DuckDB connection seeded through store's real schema.
 
-Wave 1 SHADOW: web does not import ``boss_ai_monitoring.store`` (it is not GREEN yet). This module
-defines the minimal ``events`` table shape needed to exercise ``web/queries.py`` against fixture
-rows, matching the canonical event envelope published in
-``specs/boss-ai-monitoring/briefs/shared.md`` (BL-01). Wave 3 wires web to the real store; this
-schema is a local stand-in, not a claim about store's actual DDL.
+Wave 3: LT-01 lifted the Wave 1 restriction on importing ``boss_ai_monitoring.store`` (it is GREEN
+and committed). ``fixture_conn`` uses store's own ``ensure_schema``/``load_views`` so tests read
+through the SAME six views production code does, rather than a hand-rolled table shape -- still a
+fresh in-memory connection per test, never a real file on disk.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import duckdb
 import pytest
 
+from boss_ai_monitoring.store.schema import ensure_schema, load_views
+
 InsertEvent = Callable[..., None]
 
-EVENTS_SCHEMA = """
-CREATE TABLE events (
-    event_id TEXT PRIMARY KEY,
-    ts TIMESTAMP,
-    source TEXT,
-    event_type TEXT,
-    session_id TEXT,
-    prompt_id TEXT,
-    request_id TEXT,
-    model TEXT,
-    git_sha TEXT,
-    agent_name TEXT,
-    skill_name TEXT,
-    tool_name TEXT,
-    cost_usd DOUBLE,
-    duration_ms INTEGER,
-    tokens_input INTEGER,
-    tokens_output INTEGER,
-    tokens_cache_read INTEGER,
-    tokens_cache_creation INTEGER,
-    success BOOLEAN,
-    cwd TEXT,
-    payload JSON
-)
-"""
-
-_DEFAULT_ROW: dict[str, Any] = {
+_STATIC_DEFAULT_ROW: dict[str, Any] = {
     "event_id": "evt-1",
-    "ts": datetime(2026, 7, 11, 12, 0, 0),
     "source": "otlp",
     "event_type": "api_request",
     "session_id": "sess-1",
@@ -71,9 +45,10 @@ _DEFAULT_ROW: dict[str, Any] = {
 
 @pytest.fixture
 def fixture_conn() -> Iterator[duckdb.DuckDBPyConnection]:
-    """An in-memory DuckDB connection with an empty ``events`` table."""
+    """An in-memory DuckDB connection with store's real schema + views, empty of data."""
     conn = duckdb.connect(":memory:")
-    conn.execute(EVENTS_SCHEMA)
+    ensure_schema(conn)
+    load_views(conn)
     yield conn
     conn.close()
 
@@ -83,7 +58,11 @@ def insert_event() -> InsertEvent:
     """Factory: ``insert_event(conn, **overrides)`` inserts one fixture row with MVP defaults."""
 
     def _insert(conn: duckdb.DuckDBPyConnection, **overrides: Any) -> None:
-        row = dict(_DEFAULT_ROW)
+        # `ts` defaults to "now" (not a fixed literal) so tests that rely on it matching "today"
+        # in route handlers (real `datetime.now(UTC)`, not a test-injected `now`) stay correct
+        # across a real calendar-day boundary.
+        row = dict(_STATIC_DEFAULT_ROW)
+        row["ts"] = datetime.now(UTC)
         row.update(overrides)
         columns = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
