@@ -82,6 +82,22 @@ class SessionSummary:
 
 
 @dataclass(frozen=True)
+class McpServer:
+    name: str
+    status: str
+
+
+@dataclass(frozen=True)
+class InfraSummary:
+    """outstanding.md P3: hook/plugin/MCP telemetry, read via v_hook_stats / v_infra_events."""
+
+    hook_executions: int
+    hook_errors: int
+    plugins_loaded: int
+    mcp_servers: list[McpServer]
+
+
+@dataclass(frozen=True)
 class OverviewData:
     today_cost_usd: float
     tokens_input: int
@@ -93,6 +109,8 @@ class OverviewData:
     sparkline: list[DailyCost]
     recent_sessions: list[SessionSummary]
     provenance: ProvenanceFooter
+    # Trailing + defaulted so existing constructor call sites stay valid (frozen dataclass).
+    infra: InfraSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +264,43 @@ def get_provenance_footer(
     )
 
 
+def get_infra_summary(conn: duckdb.DuckDBPyConnection | None) -> InfraSummary:
+    """Hook/plugin/MCP telemetry rollup for the overview panel (outstanding.md P3)."""
+    if conn is None:
+        return InfraSummary(hook_executions=0, hook_errors=0, plugins_loaded=0, mcp_servers=[])
+
+    hook_row = conn.execute(
+        "SELECT coalesce(sum(execution_count), 0), coalesce(sum(hooks_errored), 0) "
+        "FROM v_hook_stats"
+    ).fetchone()
+    assert hook_row is not None
+    hook_executions, hook_errors = int(hook_row[0]), int(hook_row[1])
+
+    plugin_row = conn.execute(
+        "SELECT count(*) FROM v_infra_events WHERE event_type = 'plugin_loaded'"
+    ).fetchone()
+    assert plugin_row is not None
+    plugins_loaded = int(plugin_row[0])
+
+    mcp_rows = conn.execute(
+        """
+        SELECT name, status
+        FROM v_infra_events
+        WHERE event_type = 'mcp_server_connection' AND name IS NOT NULL
+        QUALIFY row_number() OVER (PARTITION BY name ORDER BY ts DESC) = 1
+        ORDER BY name
+        """
+    ).fetchall()
+    mcp_servers = [McpServer(name=r[0], status=r[1] or "unknown") for r in mcp_rows]
+
+    return InfraSummary(
+        hook_executions=hook_executions,
+        hook_errors=hook_errors,
+        plugins_loaded=plugins_loaded,
+        mcp_servers=mcp_servers,
+    )
+
+
 def get_overview(
     conn: duckdb.DuckDBPyConnection | None,
     *,
@@ -267,6 +322,7 @@ def get_overview(
             ],
             recent_sessions=[],
             provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
+            infra=get_infra_summary(conn),
         )
 
     today = now.date()
@@ -344,6 +400,7 @@ def get_overview(
         sparkline=sparkline,
         recent_sessions=recent_sessions,
         provenance=get_provenance_footer(conn, langsmith_configured=langsmith_configured),
+        infra=get_infra_summary(conn),
     )
 
 

@@ -132,6 +132,73 @@ class TestProvenanceFooter:
         assert footer.drift_status == "ok"
 
 
+class TestInfraSummary:
+    """outstanding.md P3: hook/plugin/MCP telemetry, read via v_hook_stats / v_infra_events."""
+
+    def test_infra_summary_reads_hook_and_mcp_views(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="h1",
+            event_type="hook_execution_complete",
+            payload='{"hook_event": "SessionStart", "hook_name": "SessionStart:startup",'
+            ' "num_success": "2", "num_blocking": "0", "num_non_blocking_error": "1",'
+            ' "total_duration_ms": "10"}',
+        )
+        insert_event(
+            fixture_conn,
+            event_id="p1",
+            event_type="plugin_loaded",
+            payload='{"plugin.name": "third-party"}',
+        )
+        insert_event(
+            fixture_conn,
+            event_id="m1",
+            event_type="mcp_server_connection",
+            payload='{"plugin.name": "telegram", "status": "connected"}',
+        )
+
+        infra = queries.get_infra_summary(fixture_conn)
+
+        assert infra.hook_executions == 1
+        assert infra.hook_errors == 1
+        assert infra.plugins_loaded == 1
+        assert [(s.name, s.status) for s in infra.mcp_servers] == [("telegram", "connected")]
+
+    def test_mcp_servers_report_only_the_latest_status_per_name(self, fixture_conn, insert_event):
+        insert_event(
+            fixture_conn,
+            event_id="m1",
+            event_type="mcp_server_connection",
+            ts=datetime(2026, 7, 11, 9, 0),
+            payload='{"plugin.name": "telegram", "status": "failed"}',
+        )
+        insert_event(
+            fixture_conn,
+            event_id="m2",
+            event_type="mcp_server_connection",
+            ts=datetime(2026, 7, 11, 11, 0),
+            payload='{"plugin.name": "telegram", "status": "connected"}',
+        )
+
+        infra = queries.get_infra_summary(fixture_conn)
+
+        assert [(s.name, s.status) for s in infra.mcp_servers] == [("telegram", "connected")]
+
+    def test_missing_db_yields_zeroes(self):
+        infra = queries.get_infra_summary(None)
+
+        assert infra.hook_executions == 0
+        assert infra.hook_errors == 0
+        assert infra.plugins_loaded == 0
+        assert infra.mcp_servers == []
+
+    def test_overview_carries_infra_summary(self, fixture_conn):
+        overview = queries.get_overview(fixture_conn, now=NOW)
+
+        assert overview.infra is not None
+        assert overview.infra.hook_executions == 0
+
+
 class TestOverview:
     def test_empty_db_returns_friendly_zero_state(self, fixture_conn):
         overview = queries.get_overview(fixture_conn, now=NOW)

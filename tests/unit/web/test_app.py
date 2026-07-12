@@ -91,6 +91,22 @@ class TestOverviewRoute:
 
         assert "No sessions yet" in response.text
 
+    def test_overview_shows_infra_block_when_hook_data_exists(
+        self, client, fixture_conn, insert_event
+    ):
+        insert_event(
+            fixture_conn,
+            event_id="h1",
+            event_type="hook_execution_complete",
+            payload='{"hook_event": "SessionStart", "hook_name": "SessionStart:startup",'
+            ' "num_success": "1", "num_blocking": "0", "num_non_blocking_error": "0",'
+            ' "total_duration_ms": "10"}',
+        )
+
+        response = client.get("/")
+
+        assert "infra-summary" in response.text
+
     def test_provenance_footer_present(self, client, fixture_conn, insert_event):
         insert_event(fixture_conn, event_id="e1", source="otlp")
 
