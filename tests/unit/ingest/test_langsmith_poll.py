@@ -149,6 +149,31 @@ async def test_poll_once_follows_pagination_cursors(
     assert result.events_written == 5
 
 
+async def test_poll_once_requests_at_most_100_runs_per_page(
+    db_path: Path,
+    respx_mock: Any,
+    mock_langsmith_project: Callable[..., str],
+    mock_langsmith_runs_pages: Callable[..., None],
+) -> None:
+    """The real /runs/query endpoint 400s on a body limit > 100 ("Limit exceeds maximum
+    allowed value of 100", observed live 2026-07-12); the async SDK sends our `limit`
+    verbatim as the page size, so poll_once must never ask for more."""
+    mock_langsmith_project(respx_mock, project_name=PROJECT)
+    mock_langsmith_runs_pages(respx_mock, [[]])
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        client = _client()
+        await poll_once(PROJECT, writer, client=client)
+        await client.aclose()
+
+    query_requests = [
+        call.request for call in respx_mock.calls if call.request.url.path == "/runs/query"
+    ]
+    assert query_requests
+    for request in query_requests:
+        assert json.loads(request.content)["limit"] <= 100
+
+
 async def test_poll_once_empty_page_yields_zero_events(
     db_path: Path,
     respx_mock: Any,

@@ -127,7 +127,7 @@ async def poll_once(
     client: AsyncClient | None = None,
     cursor_key: str | None = None,
     max_retries: int = 5,
-    limit: int = 200,
+    limit: int = 100,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> PollResult:
     """One poll pass: list runs since the persisted cursor, map to events, advance the cursor.
@@ -138,7 +138,9 @@ async def poll_once(
     ``limit`` caps runs fetched in one pass: the SDK paginates internally, and on a project with
     heavy concurrent trace volume, unpaginated listing was observed in manual E2E to exhaust the
     ~10 req/10s budget within a single poll. A bounded pass costs nothing — whatever's left is
-    picked up by the next poll interval via the persisted cursor.
+    picked up by the next poll interval via the persisted cursor. The API caps ``limit`` at 100
+    (``/runs/query`` returns 400 above that, and the async SDK sends it verbatim as the page
+    size), so values above 100 are clamped.
     """
     owns_client = client is None
     client = client or AsyncClient()
@@ -163,7 +165,9 @@ async def poll_once(
                     project_name=project_name,
                     start_time=start_time,
                     select=list(_SELECT_FIELDS),
-                    limit=limit,
+                    # /runs/query rejects a body limit > 100, and AsyncClient.list_runs passes
+                    # this straight through as the page size — clamp so no caller can 400 us.
+                    limit=min(limit, 100),
                 ):
                     runs.append(run)
                 break
