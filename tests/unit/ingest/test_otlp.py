@@ -398,3 +398,28 @@ class TestRealCapturedSession:
 
         assert attrs.get("prompt") == "<REDACTED>"
         assert attrs.get("prompt_length") == "30"
+
+    def test_infra_views_surface_the_real_session(self, client: TestClient, db_path: Path) -> None:
+        """outstanding.md P3: the raw infra event types must be QUERYABLE, not just stored.
+
+        v_hook_stats / v_infra_events read straight out of the payload JSON, so this asserts
+        the real wire shapes (string-typed numbers, dotted `plugin.name` key) survive the trip.
+        """
+        payload = json.loads(self.REAL.read_text())
+        assert client.post("/v1/logs", json=payload).status_code == 200
+
+        conn = duckdb.connect(str(db_path))
+        try:
+            hook_rows = conn.execute(
+                "SELECT hook_event, hook_name, execution_count, avg_duration_ms FROM v_hook_stats"
+            ).fetchall()
+            infra_rows = conn.execute(
+                "SELECT event_type, name, status FROM v_infra_events"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert hook_rows == [("SessionStart", "SessionStart:startup", 1, 456.0)]
+        assert ("mcp_server_connection", "telegram", "connected") in infra_rows
+        assert ("plugin_loaded", "third-party", None) in infra_rows
+        assert ("hook_registered", "PreToolUse", None) in infra_rows
