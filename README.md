@@ -132,6 +132,24 @@ One service, a volume for the DuckDB file, and a **read-only** mount of `~/.clau
 > (`OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318`). This is the most common reason
 > "no events arrive" when running containerized.
 
+## Known limitations
+
+**You cannot query the DuckDB file from another process while the app is running.** DuckDB takes an
+exclusive file lock, so `duckdb "$(uv run bam config db-path)" ...` and `marimo run
+notebooks/explore.py` both fail with `IO Error: Could not set lock on file ...` while `bam serve`
+holds it. `duckdb -readonly` does **not** get around this — the lock is exclusive regardless.
+
+Stop the app first, then run your query or open the notebook:
+
+```bash
+# stop `bam serve`, then:
+duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+```
+
+This is inherent to the single-file, single-writer design (one DuckDB file, one write connection) —
+the tradeoff that buys the app its simplicity. In-process readers are unaffected: the dashboard and
+the trailing jobs read happily while ingest is writing.
+
 ## Privacy
 
 Content-capture OTel flags (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES`,

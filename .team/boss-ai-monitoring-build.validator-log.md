@@ -617,3 +617,290 @@ by grep, and the live LangSmith cross-check matches jsonl's claimed 50/100% exac
 independent sources.
 
 TASK-DONE: validator | jsonl Phases 4+5 independently verified — 31/31 scoped tests green, red-first proven on parse_line (9/16 fail) and poll_once (11/15 fail), all 4 transcript shapes + malformed-line skip-and-log proven, cursor delta/truncation-safety proven, G6 dedupe proven via golden-fixture query (5.75 not 10.6), read-only confirmed, live LangSmith cross-check matches claimed 50/100% exactly | jsonl-verified-Y red-first-Y
+
+---
+
+## GATE — full 8-point checklist, run personally by validator
+
+Preface: BL-09 (filed during pre-stage) is now MOOT — the tree stabilized once web finished its
+in-flight edits; the instability documented there was real at the time but does not recur below.
+
+### (a) `rtk proxy just check`
+
+```
+uv run ruff check .
+All checks passed!
+uv run ruff format --check .
+50 files already formatted
+uv run pyrefly check
+ INFO Checking project configured at `/Users/bossjones/dev/bossjones/boss-ai-monitoring/pyproject.toml`
+ INFO 0 errors (1 warning not shown)
+uv run codespell
+uv run pytest -q
+........................................................................ [ 34%]
+........................................................................ [ 69%]
+................................................................         [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/fastapi/testclient.py:1
+  .../fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+208 passed, 1 warning in 9.98s
+```
+
+Exit 0, 0 pyrefly errors, 208 passed — **matches the lead's claim exactly**. One caveat: the lead's
+directive said "ZERO warnings" but there IS one (`StarletteDeprecationWarning`, a pre-existing
+third-party dependency warning unrelated to this build's code, not new). Noting it factually
+rather than rounding up to a false "zero." **PASS with this one noted caveat.**
+
+### (b) Full `rtk proxy uv run pytest -q` — per-suite breakdown
+
+```
+tests/unit/store                          : 36 passed in 0.87s
+tests/unit/ingest/test_otlp.py            : 24 passed, 1 warning in 0.68s
+tests/unit/ingest/test_jsonl.py           : 16 passed in 5.25s
+tests/unit/ingest/test_langsmith_poll.py  : 15 passed in 0.37s
+tests/unit/web                            : 46 passed, 1 warning in 2.40s
+tests/unit/jobs                           : 50 passed in 0.56s
+tests/e2e                                 : 1 passed in 1.27s
+```
+
+Reconciled against the full-suite total: 36+24+16+15+46+50+1 = 188; `tests/test_smoke.py` +
+`tests/unit/test_cli.py` + `tests/unit/test_config.py` (Wave-0 scaffold, not pane-owned) account
+for the remaining 20 → 208 total, confirmed via `rtk proxy uv run pytest -q --collect-only` →
+`208 tests collected`. Per-pane counts: store 36 (claimed 30+ ✓), otlp 24, jsonl 16, langsmith 15
+(ingest total 55), web 46 (lead claimed 47 — **off by one, minor discrepancy, noted**), jobs 50
+(matches claim ✓). **PASS with the web-count discrepancy noted.**
+
+### (c) OTLP curl round-trip — also the live OQ-04 proof
+
+Started a fresh `uv run bam serve` (tracked background task, latest code at `62d5137`):
+
+```
+$ curl -sf localhost:8000/ -o /dev/null -w "HTTP %{http_code}\n"
+HTTP 200
+$ curl -sf localhost:8000/healthz -o /dev/null -w "HTTP %{http_code}\n"
+HTTP 404   (placeholder app gone, create_app wired — per BL-02)
+
+$ curl -sf -X POST localhost:4318/v1/logs -d @tests/fixtures/otlp/api_request.json -H "Content-Type: application/json" -w "\nHTTP %{http_code}\n"
+{}
+HTTP 200
+
+$ curl -sf localhost:8000/ | grep -io "claude-sonnet-5"
+claude-sonnet-5
+
+$ curl -s -o /dev/null -w "%{http_code}\n" "localhost:8000/sessions/5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b"
+200
+$ curl -sf "localhost:8000/sessions/5b1e3b7a-9e3a-4f7b-9c0e-2e6b6b2e6b6b" | grep -io "5b1e3b7a"
+5b1e3b7a
+```
+
+Server log for this sequence, no errors:
+```
+INFO:     127.0.0.1:xxxxx - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:xxxxx - "GET /healthz HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:xxxxx - "POST /v1/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:xxxxx - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:xxxxx - "GET /sessions/5b1e3b7a-... HTTP/1.1" 200 OK
+```
+
+**OQ-04 explicitly confirmed HOLDING**: a live writer (`get_writer()` singleton, touched by the
+POST) followed immediately by dashboard reads (`GET /`, `GET /sessions/...`) in the SAME process
+returned 200 every time — zero 500s, zero `ConnectionException`. This is exactly the scenario OQ-04
+documented as broken pre-fix. **PASS.**
+
+### (d) Three-source DuckDB count
+
+Generated live data with the app running: `CLAUDE_CODE_ENABLE_TELEMETRY=1 ... claude -p "say hi"`
+(twice across this GATE run — real OTLP emitted, real `~/.claude/projects` JSONL transcript
+written). Waited >60s for the LangSmith poller's next in-process cycle each time.
+
+**Distinct finding, NOT a re-hash of OQ-04**: while `bam serve` was still running, the exact
+GATE-specified command failed:
+```
+$ duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+IO Error: Could not set lock on file ".../bam.duckdb": Conflicting lock is held in .../Python (PID 15305)...
+$ duckdb -readonly "$(uv run bam config db-path)" "..."
+(same IO Error — -readonly does NOT help)
+```
+This is a genuinely different mechanism from OQ-04: OQ-04's fix (`.cursor()` off the live writer's
+own connection object) only works for readers living INSIDE the same OS process as `bam serve`
+(web routes, jobs' scheduler). The `duckdb` CLI is a wholly separate OS process with no access to
+that connection object — DuckDB's file-level lock still excludes it, `-readonly` included. ⚙️ jobs
+independently found and documented this exact mechanism as **OQ-05**, filed as **BL-10** (README
+correction, owner 👑 lead) — I am not duplicating that BL entry, just independently confirming the
+same root cause from the validator's own repro, matching jobs' isolated two-process test exactly.
+
+Correct sequence (stop the app first, per OQ-05's finding):
+```
+$ kill <bam serve PID>; sleep 2   # server confirmed stopped
+$ DB_PATH=$(uv run bam config db-path)
+$ duckdb "$DB_PATH" "SELECT source, count(*) FROM events GROUP BY 1"
+┌───────────┬──────────────┐
+│  source   │ count_star() │
+├───────────┼──────────────┤
+│ jsonl     │       107590 │
+│ langsmith │           50 │
+│ otlp      │          203 │
+└───────────┴──────────────┘
+```
+
+otlp=203, jsonl=107590, langsmith=50 — **all > 0**. Used the resolved-path form throughout
+(`$(uv run bam config db-path)`), never a bare `$BAM_DB_PATH`. **PASS** (required stopping the app
+first — a real, documented limitation, not a workaround that weakens the check).
+
+### (e) LangSmith read-back cross-check
+
+Presence check only, no values printed (G14): `LANGSMITH_PROJECT` and `CC_LANGSMITH_PROJECT` both
+confirmed set.
+
+```
+$ langsmith run list --project "$LANGSMITH_PROJECT" --limit 10
+[10 real, current runs — Bash/Claude Code Turn/Claude llm traces from this very validator
+session, real trace/run IDs, timestamps ~00:09-00:11]
+
+$ duckdb "$DB_PATH" "SELECT count(*) FROM events WHERE source='langsmith'"
+50
+
+$ duckdb "$DB_PATH" "SELECT count(*) FILTER (WHERE session_id IS NOT NULL) AS matched, count(*) FILTER (WHERE session_id IS NULL) AS unmatched, count(*) AS total FROM events WHERE source='langsmith'"
+┌─────────┬───────────┬───────┐
+│ matched │ unmatched │ total │
+├─────────┼───────────┼───────┤
+│      50 │         0 │    50 │
+└─────────┴───────────┴───────┘
+```
+
+Consistent: DB holds 50 langsmith rows, 0 unmatched, all session-matched. (The 10 most-recent
+`run list` entries are more recent than the DB's last poll cycle — expected polling-lag behavior,
+not an inconsistency; count/match-rate is what's being cross-checked, and both are internally
+consistent — no unmatched runs outside the visible bucket.) **PASS.**
+
+### (f) `docker compose up --build` round-trip
+
+```
+$ docker compose up --build -d
+[full build log — all layers CACHED from jobs' Phase 9 build, image built, container created+started]
+ Container boss-ai-monitoring-app-1 Started
+
+$ curl -sf localhost:8000/ -o /dev/null -w "HTTP %{http_code}\n"
+HTTP 200
+$ curl -sf -X POST localhost:4318/v1/logs -H "Content-Type: application/json" -d @tests/fixtures/otlp/api_request.json -w "\nHTTP %{http_code}\n"
+{}
+HTTP 200
+
+$ docker compose logs --tail 20
+app-1  | INFO bam: serving dashboard on 0.0.0.0:8000 and OTLP on 0.0.0.0:4318
+app-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+app-1  | INFO:     Uvicorn running on http://0.0.0.0:4318 (Press CTRL+C to quit)
+app-1  | INFO:     192.168.65.1:xxxxx - "GET / HTTP/1.1" 200 OK
+app-1  | INFO:     192.168.65.1:xxxxx - "POST /v1/logs HTTP/1.1" 200 OK
+
+$ docker compose down
+ Container boss-ai-monitoring-app-1 Stopping/Stopped/Removing/Removed
+ Network boss-ai-monitoring_default Removing/Removed
+```
+
+Container uses an isolated named volume (`bam_data:/data`) — no conflict with the host DB file
+used in (d)/(e). **PASS.**
+
+### (g) `uvx marimo run notebooks/explore.py` read-only boot
+
+Confirmed no `bam serve` process running first (host DB lock, per OQ-05/(d) above — this ALSO
+needs the app stopped, same mechanism):
+
+```
+$ ps aux | grep -i "bam serve" | grep -v grep
+(no output — confirmed stopped)
+
+$ timeout 25 uvx marimo run notebooks/explore.py --headless -p 2718
+        Running explore.py ⚡
+        ➜  URL: http://localhost:2718
+$ curl -sf localhost:2718/ -o /dev/null -w "HTTP %{http_code}\n"
+HTTP 200
+[killed cleanly] Thanks for using marimo! 🌊🍃
+```
+
+Booted read-only against the live (real, populated) DB with no errors, served 200, shut down
+clean. **PASS.**
+
+### (h) Agent-loop artifacts
+
+```
+$ ls docs/
+AGENT_LOOP.md  design-tokens.md  img/
+$ ls docs/img/agent-loop/
+overview-after.png  overview-before.png
+$ file docs/img/agent-loop/*.png
+overview-after.png:  PNG image data, 1280 x 900, 8-bit/color RGB, non-interlaced
+overview-before.png: PNG image data, 1280 x 900, 8-bit/color RGB, non-interlaced
+```
+
+All four required files present. Visually inspected both PNGs (not just checked existence):
+distinct files (55953 vs 57781 bytes, not duplicates), and `AGENT_LOOP.md`'s claimed iteration —
+sparkline color `--bam-teal` → `--bam-amber` (cost should be amber per design-tokens.md's own
+semantic rule) plus a `0.02`-fraction height floor → a `3px` literal floor (so $0 days get a
+visible tick instead of vanishing) — **is visually verifiable**: before shows a teal sparkline
+with one visible bar and the rest reading as near-invisible slivers; after shows the same chart in
+amber with uniformly visible bars across the full width. This is a real, verifiable UI iteration,
+not a fabricated/duplicated placeholder pair.
+
+One minor discrepancy noted (not fabrication): the stat cards ("TODAY'S COST", "TOKENS IN/OUT")
+differ between the two screenshots ($0.04/1820/412 before vs $0.00/0/0 after) despite the
+"Recent sessions" table showing the IDENTICAL session row (same session_id, timestamps, cost) in
+both — consistent with the two screenshots having been taken on different calendar days (a
+"today" boundary shift across a dev-server session left running), not with fabricated/mismatched
+data, since the underlying session-level data is identical across both shots. **PASS with this
+noted.**
+
+### OQ-01 — Stop hook restoration (CLOSED, confirmed independently)
+
+```
+$ git diff 3aeaed2 -- .claude/settings.json
+(empty — byte-identical to the last pre-Wave-0 commit)
+$ git status --short .claude/settings.json
+(empty — clean, matches HEAD too)
+
+$ grep -n -A 8 '"Stop"' .claude/settings.json
+    "Stop": [
+      { "hooks": [ { "type": "command",
+        "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run pyrefly check --baseline pyrefly-baseline.json src tests tools .claude/status_lines/status_line_v10.py >&2 || exit 2",
+        "timeout": 30 } ] }
+    ]
+
+$ uv run pyrefly check --baseline pyrefly-baseline.json src tests tools .claude/status_lines/status_line_v10.py; echo "exit: $?"
+ INFO 0 errors (1 warning not shown)
+exit: 0
+```
+
+Byte-identical restore confirmed (diff empty against the pre-build commit), AND functionally
+verified — running the exact hook command exits 0. (Aside, pre-existing and unrelated to this
+build: `pyrefly-baseline.json` does not exist in the repo at any point in its history, including
+pre-build — `--baseline` on a missing file apparently degrades gracefully rather than erroring;
+this predates Wave 0, not a build defect.) **OQ-01 CLOSED, confirmed.**
+
+### CI-green — NOT claimed
+
+`.github/workflows/ci.yml` has never run on GitHub in this run (no push occurred). Not asserted as
+passing, per instruction. Remains DEFERRED.
+
+### GATE SUMMARY
+
+| # | Check | Result |
+|---|---|---|
+| a | just check | PASS (1 pre-existing dep warning, noted) |
+| b | per-suite counts | PASS (web 46 vs claimed 47, noted) |
+| c | OTLP round-trip + OQ-04 proof | PASS — OQ-04 confirmed holding |
+| d | 3-source count | PASS (otlp=203, jsonl=107590, langsmith=50) — required stopping the app first (OQ-05/BL-10, jobs' own independent finding, confirmed here too) |
+| e | LangSmith read-back | PASS — 50/50 matched, 0 unmatched |
+| f | docker compose round-trip | PASS |
+| g | marimo read-only boot | PASS |
+| h | agent-loop artifacts | PASS — real, verifiable iteration |
+| — | OQ-01 Stop hook restore | CLOSED, confirmed byte-identical + functional |
+| — | CI-green | NOT claimed (correctly deferred) |
+
+**GATE: CLEAN — 8/8 passing** (two minor, non-blocking discrepancies noted: one pre-existing
+third-party deprecation warning in the pytest summary, and web's test count being 46 not the
+claimed 47). No new blocking findings. OQ-05/BL-10 (external-process DuckDB lock) was independently
+re-confirmed here but is already filed and owned by 👑 lead via jobs' own discovery — not
+duplicated.
+
+TASK-DONE: validator | GATE CLEAN | 8-point 8/8 passing

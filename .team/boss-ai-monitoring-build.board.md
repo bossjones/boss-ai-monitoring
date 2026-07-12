@@ -6,11 +6,26 @@
 ## FSM
 
 ```
-SCAFFOLD ✅ -> STORE-CORE ▶ -> INGEST-FANOUT -> INTEGRATE -> PACKAGE -> GATE -> DONE
+SCAFFOLD ✅ -> STORE-CORE ✅ -> INGEST-FANOUT ✅ -> INTEGRATE ✅ -> PACKAGE ✅ -> GATE ✅ -> DONE ✅
 ```
 
-**Current state: GATE** — all 9 phases implemented, `just check` green (208 tests, pyrefly 0
-errors), INTEGRATE+PACKAGE committed (`62d5137`). ✅ validator is running the 8-point checklist.
+**Current state: DONE** — GATE **CLEAN, 8/8**, personally run by ✅ validator with raw output
+pasted into `.validator-log.md`. All 9 phases implemented, TDD red-first throughout.
+
+```
+| a | just check                     | PASS  (208 passed, pyrefly 0 errors)
+| b | per-suite counts + red-first   | PASS
+| c | OTLP round-trip                | PASS  — and it is the live proof OQ-04 is dead
+| d | 3-source DuckDB count          | PASS  otlp=203, jsonl=107590, langsmith=50
+| e | LangSmith read-back            | PASS  50/50 matched, 0 unmatched
+| f | docker compose round-trip      | PASS
+| g | marimo read-only boot          | PASS
+| h | agent-loop artifacts           | PASS  — real, visually verified iteration
+| - | OQ-01 Stop hook restore        | CLOSED — byte-identical diff + runs exit 0
+| - | CI green on GitHub             | NOT CLAIMED — correctly deferred, never run
+```
+
+Nothing was pushed. The human owns the first push and the first real CI run.
 
 INGEST-FANOUT closed 2026-07-11: 📡 otlp Phase 3 **independently validator-verified** (raw output
 in `.validator-log.md` — red-first proven by gutting the handler, 12/24 failed; all edge cases
@@ -87,7 +102,7 @@ and checking the tests actually fail. Its verdict lands in `.validator-log.md`.
 | INGEST-FANOUT green | `b4a47a2 feat(ingest): OTLP receiver, JSONL reader, LangSmith poller; fix writer race` | ✅ committed |
 | INTEGRATE green | `62d5137 feat(web,jobs): live dashboard, agent loop, docker, marimo` | ✅ committed |
 | PACKAGE green | (same commit `62d5137`) | ✅ committed |
-| GATE clean | — | pending |
+| GATE clean | `<final>` — GATE CLEAN 8/8, README known-limitation documented | ✅ committed |
 
 ## WAVE 0 baseline — `just check`, green (2026-07-11)
 
