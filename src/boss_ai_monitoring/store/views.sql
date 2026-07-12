@@ -206,10 +206,18 @@ recovery AS (
         (SELECT count(*) FROM recovered_tasks) AS recovered_tasks
 ),
 successful_task_costs AS (
+    -- Denominator scoped to the numerator (specs/outstanding.md P1): a task counts here only
+    -- if at least one cost-bearing event (v_cost_events) exists for its prompt_id. The JSONL
+    -- backfill carries no cost observation at all; counting those tasks divided real OTel
+    -- dollars by the entire transcript history and collapsed the metric toward zero
+    -- ($0.00042 on real data). EXISTS on v_cost_events — not `cost_usd > 0` — so a genuinely
+    -- $0 costed task still counts, and numerator and denominator are the same population by
+    -- construction: denominator = tasks contributing to the numerator.
     SELECT vt.prompt_id, vt.cost_usd
     FROM v_tasks vt
     JOIN task_errors terr ON terr.prompt_id = vt.prompt_id
     WHERE NOT terr.has_error
+      AND EXISTS (SELECT 1 FROM v_cost_events ce WHERE ce.prompt_id = vt.prompt_id)
 )
 SELECT
     CASE WHEN c.total_tasks = 0 THEN NULL

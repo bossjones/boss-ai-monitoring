@@ -632,3 +632,57 @@ def test_v_five_metrics_computes_all_five(conn: Any, make_event: MakeEvent) -> N
     assert autonomy_score == pytest.approx(0.5)
     assert recovery_rate == pytest.approx(0.5)
     assert cost_per_task == pytest.approx(3.0)
+
+
+def test_cost_per_successful_task_counts_only_costed_tasks(
+    conn: Any, make_event: MakeEvent
+) -> None:
+    """outstanding.md P1: the denominator must be the numerator's own population.
+
+    Tasks with no cost observation at all (the JSONL backfill) must not dilute the
+    metric: $4.00 over 2 costed tasks is $2.00/task — not 4.0 / (2 + 3) = $0.80.
+    """
+    _insert_events(
+        conn,
+        [
+            # two error-free tasks WITH an OTel cost
+            make_event(
+                "c1",
+                prompt_id="p-c1",
+                session_id="s6",
+                ts=T0,
+                source="otlp",
+                event_type="api_request",
+                request_id="rq-c1",
+                cost_usd=3.0,
+            ),
+            make_event(
+                "c2",
+                prompt_id="p-c2",
+                session_id="s6",
+                ts=T0 + timedelta(minutes=1),
+                source="otlp",
+                event_type="api_request",
+                request_id="rq-c2",
+                cost_usd=1.0,
+            ),
+        ]
+        + [
+            # three error-free JSONL-backfill tasks with NO cost anywhere
+            make_event(
+                f"j{i}",
+                prompt_id=f"p-j{i}",
+                session_id="s7",
+                ts=T0 + timedelta(minutes=2 + i),
+                source="jsonl",
+                event_type="user_prompt",
+                request_id=None,
+                cost_usd=None,
+            )
+            for i in range(3)
+        ],
+    )
+
+    (value,) = conn.execute("SELECT cost_per_successful_task FROM v_five_metrics").fetchone()
+
+    assert value == pytest.approx(2.0)
