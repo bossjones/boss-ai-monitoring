@@ -270,9 +270,12 @@ SELECT
     event_type,
     CASE event_type
         WHEN 'plugin_loaded'         THEN json_extract_string(payload, '$."plugin.name"')
+        -- Observed live 2026-07-12: NON-plugin MCP connections carry no name attribute at all
+        -- (only server_scope, e.g. 'claudeai'). Fall back to scope rather than render NULL.
         WHEN 'mcp_server_connection' THEN coalesce(
                                               json_extract_string(payload, '$.server_name'),
-                                              json_extract_string(payload, '$."plugin.name"'))
+                                              json_extract_string(payload, '$."plugin.name"'),
+                                              json_extract_string(payload, '$.server_scope'))
         WHEN 'hook_registered'       THEN json_extract_string(payload, '$.hook_event')
     END AS name,
     json_extract_string(payload, '$.status')         AS status,          -- mcp only

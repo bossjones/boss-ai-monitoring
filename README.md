@@ -1,36 +1,58 @@
 # boss-ai-monitoring
 
-A single-user, single-host observability dashboard for [Claude Code](https://claude.com/claude-code)
-usage: cost, tokens by class, tool success rates, session timelines, and quality signals — pulled
-from three sources into one DuckDB file and served as a fast, no-build-step web UI.
+**See what your Claude Code sessions actually cost — live, from three independent sources that
+cross-check each other.**
 
-> **Status: built.** The application code was produced by the multi-agent build run described in
-> [How this gets built](#how-this-gets-built). The full design — phases, schemas, routes, edge
-> cases, and every decided question — remains in the spec:
-> [`specs/boss-ai-monitoring/boss-ai-monitoring.html`](specs/boss-ai-monitoring/boss-ai-monitoring.html).
+[![CI](https://github.com/bossjones/boss-ai-monitoring/actions/workflows/ci.yml/badge.svg)](https://github.com/bossjones/boss-ai-monitoring/actions/workflows/ci.yml)
+![Python 3.13](https://img.shields.io/badge/python-3.13-blue)
+![uv](https://img.shields.io/badge/packaging-uv-de5fe9)
+![DuckDB](https://img.shields.io/badge/store-DuckDB-fff100)
+![no build step](https://img.shields.io/badge/frontend-htmx%2C%20no%20npm-3d72d7)
 
-## What it does
+![Overview dashboard on real data](docs/img/dashboard/overview.png)
 
-- **Ingests three signal sources** into a canonical `events` table:
-  1. **OTLP telemetry** — Claude Code's native OpenTelemetry export (http/json, port 4318,
-     received directly by the app; no collector).
-  2. **JSONL transcripts** — incremental reads of `~/.claude/projects/**/*.jsonl` (mounted
-     read-only), for backfill and gap-fill. JSONL-derived costs are flagged estimates.
-  3. **LangSmith runs** — cursor-based polling of the LangSmith API (rate-limit aware; degrades
-     gracefully without an API key).
-- **Stores everything in one DuckDB file** — canonical event envelope with a JSON `payload`
-  column, batched idempotent writer, single write connection.
-- **Serves a dashboard** (FastAPI + Jinja2 + htmx + SSE): `/` overview with stat tiles and a
-  14-day cost sparkline, `/live` streaming feed, `/sessions/{id}` per-task timelines with
-  LangSmith deep-links, `/costs` rollups and attribution. Every panel has a JSON twin and a
-  provenance/freshness footer.
-- **Runs trailing quality jobs**: correction-language scan, OTel-vs-JSONL drift self-check, error
-  classification. Deterministic heuristics only — no LLM-judge in v1.
-- **Ships a marimo notebook** (`notebooks/explore.py`) for ad-hoc exploration over a read-only
-  DuckDB connection, and a Docker Compose deployment (ports 8000 + 4318).
+The sessions in that screenshot are the **multi-agent team that built this repo** — the tool
+monitored its own construction. Every image in [`docs/PROOF.md`](docs/PROOF.md) is captured from
+the live app against the real database; the capture script prints `LOOKS EMPTY` and refuses to
+fake a shot rather than render a pretty blank page.
 
-The full design — phases, schemas, routes, edge cases, and every decided question — lives in the
-spec: [`specs/boss-ai-monitoring/boss-ai-monitoring.html`](specs/boss-ai-monitoring/boss-ai-monitoring.html).
+## Why this exists
+
+Claude Code emits telemetry, writes JSONL transcripts, and (optionally) traces to LangSmith — and
+none of those three agree with each other by default. This dashboard lands all three in **one
+DuckDB file** with per-row source lineage, then tells you cost, tokens, tool success rates,
+session timelines, and quality signals — and *where every number came from*.
+
+## A monitoring tool that never lies to you
+
+Most dashboards optimize for looking healthy. This one optimizes for being caught:
+
+- **Provenance on every panel.** Each view carries a footer naming every source, its freshness,
+  and its event count (`otlp · jsonl · langsmith`), plus the drift self-check's latest verdict.
+- **`—` instead of invented numbers.** Metrics with no supporting events render as an em dash,
+  never a fabricated zero. Sub-cent costs render `<$0.01`, never a false `$0.00`.
+- **Missing config is loud.** If the LangSmith poller isn't configured, the footer says so and
+  names the exact env var — no silently-dead ingest source.
+- **A drift job cross-checks OTel against the JSONL transcripts** on a schedule and badges the
+  result on every page.
+- **[`docs/PROOF.md`](docs/PROOF.md)** shows the failure modes *and* their fixes in the same
+  screenshots — including the DuckDB file-lock error and the `bam snapshot` escape hatch.
+
+## What you get
+
+| | |
+|---|---|
+| [![Overview](docs/img/dashboard/overview.png)](docs/PROOF.md#overview-----) | [![Costs](docs/img/dashboard/costs.png)](docs/PROOF.md#costs----costs) |
+| **Overview** — stat tiles, 14-day cost sparkline, infra summary, recent sessions | **Costs** — daily/weekly rollups, per-model attribution, "the 5 metrics that matter" |
+| [![Live](docs/img/dashboard/live.png)](docs/PROOF.md#live----live) | [![Session detail](docs/img/dashboard/session-detail.png)](docs/PROOF.md#session-detail----sessionsid) |
+| **Live** — SSE event feed and active-session cards, no page reloads | **Session detail** — per-task timeline: prompt, duration, cost, tokens, tool ok/fail, LangSmith deep-link |
+
+Under the hood: OTLP http/json received directly on `:4318` (no collector, no gRPC), incremental
+JSONL transcript backfill, cursor-based LangSmith polling, trailing quality jobs
+(correction-language scan, OTel-vs-JSONL drift, error classification — deterministic heuristics,
+no LLM judge), a marimo notebook for ad-hoc SQL, and Docker Compose when you want it. Metrics are
+SQL **views** over one canonical `events` table — new event types need no migrations, and hook /
+plugin / MCP telemetry is queryable via `v_hook_stats` and `v_infra_events`.
 
 ## Quickstart
 
@@ -40,8 +62,7 @@ uv run bam serve            # then open http://localhost:8000
 ```
 
 `bam serve` runs **one** FastAPI app on **two** binds in a single asyncio loop — the dashboard on
-`:8000` and the OTLP receiver on `:4318`. There is no collector and no gRPC; the app speaks OTLP
-http/json directly.
+`:8000` and the OTLP receiver on `:4318`.
 
 Point Claude Code's telemetry at the receiver (see the sample env file for the full variable set):
 
@@ -101,11 +122,14 @@ the same `(session_id, request_id)`.
 
 Two keys, two jobs. Tracing *in* (Claude Code → LangSmith) uses the LangSmith Claude Code plugin
 (`TRACE_TO_LANGSMITH`, `CC_LANGSMITH_API_KEY`, `CC_LANGSMITH_PROJECT`). Polling *out*
-(LangSmith → dashboard) uses `LANGSMITH_API_KEY`. The poller is cursor-based and rate-limit aware,
-and degrades gracefully when no API key is configured — the app still boots and serves.
+(LangSmith → dashboard) uses `LANGSMITH_API_KEY` **and `BAM_INGEST__LANGSMITH_PROJECT`** — the
+poller deliberately does not read the ambient `LANGSMITH_PROJECT` (all config flows through
+`config.py`), and both the startup log and the dashboard footer will tell you if you forgot.
+The poller is cursor-based and rate-limit aware, and degrades gracefully when no API key is
+configured — the app still boots and serves.
 
-`CC_LANGSMITH_PROJECT` and `LANGSMITH_PROJECT` must name the **same** project, or you will trace
-into one and read back from another. The
+`CC_LANGSMITH_PROJECT` and `BAM_INGEST__LANGSMITH_PROJECT` must name the **same** project, or you
+will trace into one and read back from another. The
 [`langsmith` CLI](https://github.com/langchain-ai/langsmith-cli) is the read-back check:
 
 ```bash
@@ -167,15 +191,18 @@ read happily while ingest is writing.
 ## Privacy
 
 Content-capture OTel flags (`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_ASSISTANT_RESPONSES`,
-`OTEL_LOG_TOOL_DETAILS`) stay **off** by default — telemetry is metadata unless you opt in.
-Dashboard and OTLP ports bind localhost; single-user, trusted-network scope; no auth by design.
+`OTEL_LOG_TOOL_DETAILS`) stay **off** by default — telemetry is metadata unless you opt in. A test
+verifies at the wire that Claude Code sends `prompt=<REDACTED>` when they're off. Dashboard and
+OTLP ports bind localhost; single-user, trusted-network scope; no auth by design.
 `~/.claude/projects` is mounted read-only everywhere it is read — locally and in the container.
 
-## How this gets built
+## How this got built
 
-The implementation is executed by a 7-pane multi-agent cmux team driven by
+The implementation was executed by a 7-pane multi-agent cmux team driven by
 [`prompts/boss-ai-monitoring-build-team.md`](prompts/boss-ai-monitoring-build-team.md) — TDD
 red-first, exclusive file ownership per pane, `just check` as the definition of done, local
-commits only (the human pushes after review). See [`prompts/README.md`](prompts/README.md) for the
-prompt lineage and [`CLAUDE.md`](CLAUDE.md) for the conventions any Claude Code session in this
-repo must follow.
+commits only (the human pushes after review). The full design — phases, schemas, routes, edge
+cases, and every decided question — lives in the spec:
+[`specs/boss-ai-monitoring/boss-ai-monitoring.html`](specs/boss-ai-monitoring/boss-ai-monitoring.html).
+See [`prompts/README.md`](prompts/README.md) for the prompt lineage and [`CLAUDE.md`](CLAUDE.md)
+for the conventions any Claude Code session in this repo must follow.

@@ -781,6 +781,19 @@ def test_v_infra_events_extracts_dotted_payload_keys(conn: Any, make_event: Make
                     "hook_source": "userSettings",
                 },
             ),
+            # observed live 2026-07-12: a NON-plugin MCP connection carries no name attribute
+            # at all — only server_scope. The view must fall back to it, not render NULL.
+            make_event(
+                "i4",
+                ts=T0 + timedelta(minutes=3),
+                event_type="mcp_server_connection",
+                payload={
+                    "status": "connected",
+                    "transport_type": "claudeai-proxy",
+                    "server_scope": "claudeai",
+                    "is_plugin": False,
+                },
+            ),
         ],
     )
 
@@ -793,4 +806,5 @@ def test_v_infra_events_extracts_dotted_payload_keys(conn: Any, make_event: Make
         ("plugin_loaded", "third-party", None, None, None, None),
         ("mcp_server_connection", "telegram", "connected", "stdio", None, 95),
         ("hook_registered", "PreToolUse", None, None, "userSettings", None),
+        ("mcp_server_connection", "claudeai", "connected", "claudeai-proxy", None, None),
     ]
