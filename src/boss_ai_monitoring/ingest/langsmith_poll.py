@@ -137,7 +137,9 @@ async def poll_once(
 
     ``limit`` caps runs fetched in one pass: the SDK paginates internally, and on a project with
     heavy concurrent trace volume, unpaginated listing was observed in manual E2E to exhaust the
-    ~10 req/10s budget within a single poll. A bounded pass costs nothing — whatever's left is
+    ~10 req/10s budget within a single poll. A bounded pass costs nothing — runs are fetched
+    oldest-first (``order="asc"``; the API defaults to newest-first, which would let a capped
+    pass advance the cursor past the unfetched older backlog and lose it), so whatever's left is
     picked up by the next poll interval via the persisted cursor. The API caps ``limit`` at 100
     (``/runs/query`` returns 400 above that, and the async SDK sends it verbatim as the page
     size), so values above 100 are clamped.
@@ -168,6 +170,10 @@ async def poll_once(
                     # /runs/query rejects a body limit > 100, and AsyncClient.list_runs passes
                     # this straight through as the page size — clamp so no caller can 400 us.
                     limit=min(limit, 100),
+                    # The API defaults to newest-first, under which a pass that fills the cap
+                    # advances the cursor past the UNFETCHED older backlog and drops it forever.
+                    # Oldest-first makes the cursor floor the remainder so the next pass drains it.
+                    order="asc",
                 ):
                     runs.append(run)
                 break

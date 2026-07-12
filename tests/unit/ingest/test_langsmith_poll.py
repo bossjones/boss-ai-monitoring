@@ -174,6 +174,33 @@ async def test_poll_once_requests_at_most_100_runs_per_page(
         assert json.loads(request.content)["limit"] <= 100
 
 
+async def test_poll_once_requests_oldest_runs_first(
+    db_path: Path,
+    respx_mock: Any,
+    mock_langsmith_project: Callable[..., str],
+    mock_langsmith_runs_pages: Callable[..., None],
+) -> None:
+    """/runs/query defaults to newest-first (observed live 2026-07-12), which silently DROPS
+    the older backlog whenever a poll hits the 100-run cap: the cursor lands 60s behind the
+    newest run and everything older than the fetched page can never match a later window.
+    Ascending order makes a capped pass take the OLDEST runs, so the cursor floors the next
+    pass and the backlog drains instead."""
+    mock_langsmith_project(respx_mock, project_name=PROJECT)
+    mock_langsmith_runs_pages(respx_mock, [[]])
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        client = _client()
+        await poll_once(PROJECT, writer, client=client)
+        await client.aclose()
+
+    query_requests = [
+        call.request for call in respx_mock.calls if call.request.url.path == "/runs/query"
+    ]
+    assert query_requests
+    for request in query_requests:
+        assert json.loads(request.content)["order"] == "asc"
+
+
 async def test_poll_once_empty_page_yields_zero_events(
     db_path: Path,
     respx_mock: Any,

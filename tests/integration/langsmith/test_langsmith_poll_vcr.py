@@ -11,16 +11,14 @@ is stable across record and replay (a cursorless first poll computes start_time 
 datetime.now, which changes every run). FIXED_TS values were chosen at record time against
 the real boss-ai-monitoring project.
 
-Two deliberate deviations from specs/tdd-vcr-tests.md, both forced by recorded reality:
-- The SDK's list_runs(limit=N) is both the page size and a TOTAL results cap
-  (async_client.py breaks at `ix >= limit`), so one poll_once pass can never see more than
-  100 runs and the spec's `runs_seen > 100` assertion is unsatisfiable.
-- /runs/query returns runs newest-first (observed at record time), so after a capped pass
-  over a >100-run backlog the cursor lands 60s behind the NEWEST run and the older backlog
-  is never re-fetched — the "next poll picks up the rest" claim in poll_once's docstring
-  does not hold for over-cap backlogs. That is a src/ bug outside this tests-only change;
-  test_full_backlog_page_accepted_at_api_cap documents the part that IS contract-true (the
-  API accepts the clamped page size), not the broken drain.
+One deliberate deviation from specs/tdd-vcr-tests.md, forced by recorded reality: the SDK's
+list_runs(limit=N) is both the page size and a TOTAL results cap (async_client.py breaks at
+`ix >= limit`), so one poll_once pass can never see more than 100 runs and the spec's
+single-pass `runs_seen > 100` assertion is unsatisfiable. The drain test asserts the
+equivalent production truth across two cursor-chained passes instead. (Recording this suite
+also surfaced that /runs/query defaults to newest-first, which made a capped pass drop the
+older backlog permanently — fixed by ordering ascending in poll_once; the drain test is the
+live regression for both that fix and the original limit-clamp bug.)
 """
 
 from __future__ import annotations
@@ -78,31 +76,33 @@ async def test_poll_once_against_live_recording(db_path: Path) -> None:
     assert all(str(row["event_id"]).startswith("langsmith:") for row in rows)
 
 
-async def test_full_backlog_page_accepted_at_api_cap(db_path: Path) -> None:
-    """Live-shaped regression for the limit bug, over a window with >100 real runs.
+async def test_capped_backlog_drains_across_passes(db_path: Path) -> None:
+    """Live-shaped regression for the limit bug AND the ordering bug, over >100 real runs.
 
     poll_once(limit=250) must clamp the page size to the API max of 100 — re-recording with
     the unclamped historical request (limit sent verbatim) would 400 and fail the recording
-    run — and the SDK then caps the pass at exactly those 100 runs. Seeing the full page come
-    back is the proof the API accepted our clamped request against a genuine over-cap
-    backlog. (The rest of that backlog is currently LOST to the desc-order cursor jump — see
-    the module docstring — so no drain assertion is made here.)
+    run — and must ask for the OLDEST runs first, so the pass that fills the cap leaves the
+    cursor flooring the remainder. Pass 2 then drains the backlog past 100 distinct runs,
+    exactly as run_forever's next poll interval would. (With the API's newest-first default,
+    the older backlog was permanently skipped and this test could not pass.)
     """
     client = AsyncClient()
     with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
         writer.set_cursor("langsmith", PROJECT, FIXED_TS_WIDE)
-        result = await poll_once(PROJECT, writer, client=client, limit=250)
+        first = await poll_once(PROJECT, writer, client=client, limit=250)
+        second = await poll_once(PROJECT, writer, client=client, limit=250)
         await client.aclose()
         writer.flush()
 
-    assert result.status == "ok"
-    assert result.runs_seen == 100  # the full clamped page — the API accepted limit=100
-    assert result.events_written == 100
+    assert first.status == "ok"
+    assert first.runs_seen == 100  # the full clamped page — the API accepted limit=100
+    assert second.status == "ok"
+    assert second.runs_seen > 0
 
     rows = _langsmith_rows(db_path)
     distinct_ids = {row["event_id"] for row in rows}
-    assert len(rows) == 100
-    assert len(distinct_ids) == 100
+    assert len(rows) == len(distinct_ids)  # dedupe held across the overlap re-fetch
+    assert len(distinct_ids) > 100  # the backlog past the cap DRAINED instead of being lost
 
 
 async def test_second_pass_is_idempotent_and_cursor_driven(db_path: Path) -> None:
