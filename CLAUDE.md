@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 tool stats, and session timelines — fed by three ingest sources (OTLP telemetry, `~/.claude/projects`
 JSONL transcripts, LangSmith runs) into one DuckDB file, served by a FastAPI + Jinja2 + htmx app.
 
-The repo is currently **pre-build**: the Python package does not exist yet. Everything is specified in
-two authoritative documents:
+The package is **built** (Phases 1–9 landed 2026-07-11 by a 7-pane cmux team; `just check` green,
+208 tests). Two authoritative documents still govern any further work:
 
 - `specs/boss-ai-monitoring/boss-ai-monitoring.html` — the full 9-phase spec, canonical and
   human-facing (read-only reference; do not edit its inline status markers during a build run).
@@ -21,8 +21,6 @@ two authoritative documents:
   here, even outside a team run.
 
 ## Commands
-
-Once the package is scaffolded (`uv init --package --python 3.13`), the workflow is:
 
 ```bash
 just check                 # definition of done: ruff check + ruff format --check + pyrefly + codespell + pytest
@@ -39,8 +37,11 @@ uv run bam config db-path  # print the resolved DuckDB path (use this in shell c
 Verification CLIs (installed on this machine):
 
 ```bash
-duckdb "$BAM_DB_PATH" "SELECT source, count(*) FROM events GROUP BY 1"   # row counts per ingest source
-langsmith run list --project "$LANGSMITH_PROJECT"                        # LangSmith read-back (auth is ambient via direnv)
+# ALWAYS the resolved-path form — a bare $BAM_DB_PATH is unset in most shells and silently
+# opens an EMPTY db, which reads as a fake-green result. Stop `bam serve` first (see DuckDB below).
+duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP BY 1"
+langsmith run list --project "$LANGSMITH_PROJECT"   # LangSmith read-back (auth is ambient via direnv)
+rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output is evidence
 ```
 
 ## Non-negotiable conventions
@@ -48,12 +49,19 @@ langsmith run list --project "$LANGSMITH_PROJECT"                        # LangS
 - **Python via `uv` only** (`uv run`, `uvx`); Python 3.13; src/ layout (`src/boss_ai_monitoring/`).
 - **Type checker is pyrefly.** Use the `/agent-harness:pyrefly-typing` skill for annotation help.
 - **TDD red-first**: the failing test exists and fails before the implementation does.
-- **Git: commit locally on the current branch; NEVER push.** The human pushes and reviews. No
-  `gh repo create` — the `bossjones/boss-ai-monitoring` remote already exists.
+- **Git: commit locally on the current branch; do NOT push unless the human explicitly asks.**
+  During an autonomous build run, never push — the human reviews first. No `gh repo create`; the
+  `bossjones/boss-ai-monitoring` remote already exists.
 - **Config discipline**: all settings flow through `config.py` (`BamSettings`, pydantic-settings);
   precedence env (`BAM_` prefix, `__` nesting) > YAML > defaults. No ad-hoc `os.environ` reads.
-- **DuckDB single-writer**: exactly one write connection, owned by `store/writer.py`. Notebooks and
-  everything else open read-only connections.
+- **DuckDB single-writer**: exactly one write connection, owned by `store/writer.py`. Readers use
+  `connect_read_only()`, which is writer-aware *in-process*. **Cross-process the file lock is
+  exclusive**: you CANNOT run the `duckdb` CLI or marimo against the DB while `bam serve` holds the
+  write connection (`Can't open a connection to same database file with a different
+  configuration`) — stop the app first. The spec's "readers never fight the writer" claim is only
+  half true; this was proven in OQ-04/OQ-05, do not re-derive it.
+- **The whole `flush()` DB round-trip is lock-protected**, not just the buffer swap — releasing the
+  lock before `BEGIN TRANSACTION` let concurrent producers race the shared connection (OQ-02).
 - **OTLP is http/json only** on :4318 — no gRPC, no otel-collector.
 - **Frontend**: htmx vendored as a single static file; no npm, no build step.
 - **Fast dev loop**: iterate against `uv run bam serve` locally; bring `docker compose` up the
@@ -62,6 +70,33 @@ langsmith run list --project "$LANGSMITH_PROJECT"                        # LangS
   them via `BAM_*` env config.
 - **Privacy**: OTel content-capture flags stay OFF by default; `~/.claude/projects` is mounted
   read-only wherever it is read.
+
+## Multi-agent (cmux) runs — hard-won, do not re-learn
+
+Observed live on 2026-07-11 during the 7-pane build. Full detail in
+`.team/boss-ai-monitoring-build.board.md` ("LESSONS FOR THE NEXT RUN").
+
+- **The lead pane goes idle after every turn.** Workers never self-dispatch and cannot see each
+  other, so when the lead stops, the whole team stops *silently* — no error, no red pill. Run a
+  background watchdog that re-drives the lead whenever it is idle and the board is not DONE. This
+  was the single biggest time sink of the run (~19 automated nudges + 3 by hand).
+- **Liveness = screen-diff, never a text marker.** md5 `cmux read-screen` twice ~10s apart; changed
+  = working. Grepping for `esc to interrupt` gave a FALSE "idle" on a pane that was actively
+  working — a false stall diagnosis is worse than a missed one.
+- **`cmux new-workspace` / `new-split` ignore `--json`** (they print `OK workspace:9`). Resolve new
+  surface UUIDs by diffing `cmux tree --all`. Short refs (`surface:N`) renumber; UUIDs are the only
+  stable handle — persist them to a roster file.
+- **Quote model args**: `--model opus[1m]` is glob-eaten by zsh (`no matches found`); use
+  `--model 'opus[1m]'`. Same trap with any unquoted glob (`docker images -q foo*`).
+- **The Claude composer renders ghost hint text** that drifts on its own and looks EXACTLY like a
+  stranded missed-enter send. Probe with a real prompt before "fixing" it.
+- **This repo's own `Stop` hook is hostile to multi-pane runs**: repo-wide `pyrefly ... || exit 2`
+  force-continues *idle* panes over *other* panes' WIP errors, pressuring a blocked agent into
+  editing files it does not own. Neutralize `.hooks.Stop` for the run, back it up verbatim, restore
+  before the gate. (`just check` still enforces pyrefly, so nothing escapes.)
+- **The validator must WRITE its log**, not just speak a verdict — a verdict that exists only on a
+  scrollable terminal is not evidence. Confirm by artifact (git deltas, file mtimes, exit codes,
+  duckdb counts), never by silence or by a Claude Code notification.
 
 ## Secrets and hooks
 
@@ -80,5 +115,7 @@ langsmith run list --project "$LANGSMITH_PROJECT"                        # LangS
 - `prompts/` — build-team prompts and their lineage notes (`prompts/README.md`)
 - `.claude/` — project Claude Code settings, hooks, status line
 - `logs/` — hook event logs (chat.json, pre/post tool use, etc.)
-- Planned by the build: `src/boss_ai_monitoring/{config.py,store/,ingest/,web/,jobs/}`,
+- `.team/` — build-team durable state: board (FSM/roster/lessons), backlog, open questions,
+  validator log. The board is the resume point for any confused or restarted agent.
+- `src/boss_ai_monitoring/{config.py,cli.py,store/,ingest/,web/,jobs/}`,
   `tests/{unit,integration,e2e}/`, `justfile`, `compose.yaml`, `notebooks/explore.py`
