@@ -164,6 +164,30 @@ def test_cursor_persists_byte_offset_per_file(
     assert int(cursor) == path.stat().st_size
 
 
+def test_a_corrupt_non_integer_cursor_rescans_the_file_instead_of_crashing(
+    projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
+) -> None:
+    """A GUARD, not the fix for OQ-06.
+
+    The shared-connection race (see tests/unit/store/test_writer_concurrency.py) is what actually
+    put a session UUID where a byte offset belonged and killed the scan pass with
+    `ValueError: invalid literal for int() with base 10: 'f18ed300-...'`. That is fixed by locking
+    the cursor accessors. This guard only covers a genuinely corrupt `ingest_cursors` row — a
+    hand-edited DB, a restored snapshot, a future schema change — and it is safe to rescan because
+    the flush anti-joins on `event_id`, so re-ingest writes zero duplicate rows.
+    """
+    path = copy_fixture("completed_session.jsonl", projects_dir / "proj-a")
+
+    with EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000) as writer:
+        writer.set_cursor("jsonl", str(path), "f18ed300-bc85-4b9f-918f-845d4bc5140c")
+
+        stats = scan_once(projects_dir, writer)  # must not raise
+        writer.flush()
+
+        assert stats.events_written > 0, "a corrupt cursor should rescan the file from byte 0"
+        assert writer.get_cursor("jsonl", str(path)) == str(path.stat().st_size)
+
+
 def test_truncated_file_resets_cursor_safely(
     projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
 ) -> None:
@@ -440,3 +464,29 @@ async def test_scan_does_not_block_the_event_loop(tmp_path: Path, monkeypatch) -
     assert ticks_seen_during_scan > 0, (
         "the event loop was frozen for the whole scan — no other coroutine could run"
     )
+
+
+def test_scan_does_not_advance_the_cursor_past_events_it_never_flushed(
+    projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
+) -> None:
+    """Cursor durability must FOLLOW data durability, or a restart loses events permanently.
+
+    `write_many()` only flushes at `batch_size` (500) — it ignores `flush_interval_ms`, there is no
+    periodic flusher, and `bam serve` never closes its writer. So a scan pass that produces fewer
+    than 500 events buffers them in memory and then records the cursor as having CONSUMED them.
+    Ctrl-C and they are gone: the next boot resumes from the advanced offset and never re-reads
+    them.
+    """
+    path = copy_fixture("completed_session.jsonl", projects_dir / "proj-a")
+
+    # deliberately NOT a `with` block — `bam serve` never closes the writer, and that is the point
+    writer = EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000)
+    stats = scan_once(projects_dir, writer)
+    cursor = writer.get_cursor("jsonl", str(path))
+
+    assert stats.events_written > 0, "fixture must produce events for this test to mean anything"
+    assert _peek_count(db_path) == stats.events_written, (
+        "events were buffered but never flushed, yet the cursor advanced past them — "
+        "a restart would lose them forever"
+    )
+    assert cursor == str(path.stat().st_size)

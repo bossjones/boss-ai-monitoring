@@ -77,8 +77,26 @@ _COLUMN_COERCE: dict[str, Callable[[Any], Any]] = {
 }
 
 
+class MalformedPayloadError(ValueError):
+    """Body was valid JSON but not a valid OTLP structure. The routes turn this into a 400.
+
+    Without it, an exporter sending JSON of the wrong SHAPE (`{"resourceLogs": ["x"]}`, or an
+    `intValue` of `"abc"`) reached `.get()` on a `str` / a bare `int()` and 500'd. Bad *JSON* was
+    already rejected with 400; bad *shape* crashed the receiver.
+    """
+
+
+def _as_mapping(value: Any, what: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise MalformedPayloadError(f"{what} must be a JSON object, got {type(value).__name__}")
+    return value
+
+
 def _decode_any_value(value: dict[str, Any] | None) -> Any:
-    """OTLP JSON ``AnyValue`` -> a plain Python value."""
+    """OTLP JSON ``AnyValue`` -> a plain Python value.
+
+    Every cast is guarded: these fields come straight off the wire from an arbitrary exporter.
+    """
     if not value:
         return None
     if "stringValue" in value:
@@ -86,15 +104,27 @@ def _decode_any_value(value: dict[str, Any] | None) -> Any:
     if "boolValue" in value:
         return bool(value["boolValue"])
     if "intValue" in value:
-        return int(value["intValue"])
+        try:
+            return int(value["intValue"])
+        except (TypeError, ValueError) as exc:
+            raise MalformedPayloadError(
+                f"intValue is not an integer: {value['intValue']!r}"
+            ) from exc
     if "doubleValue" in value:
-        return float(value["doubleValue"])
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError) as exc:
+            raise MalformedPayloadError(
+                f"doubleValue is not a number: {value['doubleValue']!r}"
+            ) from exc
     if "arrayValue" in value:
-        return [_decode_any_value(v) for v in value["arrayValue"].get("values", [])]
+        values = _as_mapping(value["arrayValue"], "arrayValue").get("values") or []
+        return [_decode_any_value(_as_mapping(v, "arrayValue entry")) for v in values]
     if "kvlistValue" in value:
+        entries = _as_mapping(value["kvlistValue"], "kvlistValue").get("values") or []
         return {
             kv["key"]: _decode_any_value(kv.get("value"))
-            for kv in value["kvlistValue"].get("values", [])
+            for kv in (_as_mapping(e, "kvlistValue entry") for e in entries)
             if "key" in kv
         }
     if "bytesValue" in value:
@@ -175,16 +205,20 @@ def _build_log_event(resource_attrs: dict[str, Any], record: dict[str, Any]) -> 
 def parse_logs_payload(data: dict[str, Any]) -> list[Event]:
     """``resourceLogs -> scopeLogs -> logRecords`` -> canonical events.
 
-    Defensive throughout (``.get(..., [])``): a missing or unexpected substructure yields fewer
-    events, never a crash. A genuinely malformed *outer* body (not even a JSON object) is rejected
-    with 400 before this is ever called.
+    A *missing* substructure yields fewer events, never a crash. A substructure of the wrong TYPE
+    raises `MalformedPayloadError`, which the route turns into a 400 — the `.get(..., [])` guards
+    only ever covered the lists, so a non-mapping element used to reach `.get()` on a `str` and
+    500 the receiver.
     """
     events: list[Event] = []
     for resource_logs in data.get("resourceLogs") or []:
-        resource_attrs = _attrs_to_dict((resource_logs.get("resource") or {}).get("attributes"))
+        resource_logs = _as_mapping(resource_logs, "resourceLogs entry")
+        resource = _as_mapping(resource_logs.get("resource") or {}, "resource")
+        resource_attrs = _attrs_to_dict(resource.get("attributes"))
         for scope_logs in resource_logs.get("scopeLogs") or []:
+            scope_logs = _as_mapping(scope_logs, "scopeLogs entry")
             for record in scope_logs.get("logRecords") or []:
-                events.append(_build_log_event(resource_attrs, record))
+                events.append(_build_log_event(resource_attrs, _as_mapping(record, "logRecord")))
     return events
 
 
@@ -228,10 +262,13 @@ def parse_metrics_payload(data: dict[str, Any]) -> list[Event]:
     """
     events: list[Event] = []
     for resource_metrics in data.get("resourceMetrics") or []:
-        resource_attrs = _attrs_to_dict((resource_metrics.get("resource") or {}).get("attributes"))
+        resource_metrics = _as_mapping(resource_metrics, "resourceMetrics entry")
+        resource = _as_mapping(resource_metrics.get("resource") or {}, "resource")
+        resource_attrs = _attrs_to_dict(resource.get("attributes"))
         for scope_metrics in resource_metrics.get("scopeMetrics") or []:
+            scope_metrics = _as_mapping(scope_metrics, "scopeMetrics entry")
             for metric in scope_metrics.get("metrics") or []:
-                events.extend(_build_metric_events(resource_attrs, metric))
+                events.extend(_build_metric_events(resource_attrs, _as_mapping(metric, "metric")))
     return events
 
 
@@ -287,7 +324,12 @@ def get_router() -> APIRouter:
                 status_code=400, detail="ExportLogsServiceRequest must be a JSON object"
             )
 
-        _write_and_flush(get_writer(settings), parse_logs_payload(data))
+        try:
+            events = parse_logs_payload(data)
+        except MalformedPayloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        _write_and_flush(get_writer(settings), events)
         return JSONResponse({})
 
     @router.post("/v1/metrics")
@@ -299,7 +341,12 @@ def get_router() -> APIRouter:
                 status_code=400, detail="ExportMetricsServiceRequest must be a JSON object"
             )
 
-        _write_and_flush(get_writer(settings), parse_metrics_payload(data))
+        try:
+            events = parse_metrics_payload(data)
+        except MalformedPayloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        _write_and_flush(get_writer(settings), events)
         return JSONResponse({})
 
     return router

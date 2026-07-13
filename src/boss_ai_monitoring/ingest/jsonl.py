@@ -254,6 +254,28 @@ class ScanStats:
     events_written: int = 0
 
 
+def _parse_offset(cursor_raw: str | None, cursor_key: str) -> int:
+    """The persisted byte offset for one transcript, or 0 to rescan it from the start.
+
+    A GUARD, not a fix. The one time this fired in production the cursor held a session UUID, and
+    the cause was a race on the writer's shared connection, not a bad row — fixed in
+    ``store/writer.py``. Rescanning is safe (the flush anti-joins on ``event_id``, so a re-read
+    writes no duplicates) but it is NOT free, so this warns loudly rather than swallowing it: a
+    silent rewind to 0 every pass would look exactly like "ingest is fine, just slow".
+    """
+    if cursor_raw is None:
+        return 0
+    try:
+        return int(cursor_raw)
+    except ValueError:
+        logger.warning(
+            "jsonl: cursor for %s is not a byte offset (%r) — rescanning this file from 0",
+            cursor_key,
+            cursor_raw,
+        )
+        return 0
+
+
 def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
     """One incremental pass over the transcript directory.
 
@@ -266,11 +288,11 @@ def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
         return stats
 
     session_states: dict[str, _SessionState] = {}
+    pending_cursors: list[tuple[str, str]] = []
     for path in sorted(projects_dir.glob(DEFAULT_SCAN_GLOB)):
         stats.files_scanned += 1
         cursor_key = str(path)
-        cursor_raw = writer.get_cursor(SOURCE, cursor_key)
-        offset = int(cursor_raw) if cursor_raw is not None else 0
+        offset = _parse_offset(writer.get_cursor(SOURCE, cursor_key), cursor_key)
 
         try:
             size = path.stat().st_size
@@ -289,7 +311,22 @@ def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
         if events:
             writer.write_many(events)
             stats.events_written += len(events)
-        writer.set_cursor(SOURCE, cursor_key, str(new_offset))
+        pending_cursors.append((cursor_key, str(new_offset)))
+
+    # ONE flush for the whole pass, THEN advance every cursor — cursor durability must follow data
+    # durability. `write_many` only flushes once the buffer hits `batch_size` (500), so a small
+    # pass leaves events in memory; advancing a cursor first would record them as consumed, and
+    # since `bam serve`'s writer is closed only at shutdown, a crash would drop them while the next
+    # boot resumed PAST them.
+    #
+    # Flushing per FILE instead would be O(files) transactions — 3000 transcripts took 60s against
+    # a 20s budget (caught by test_scan_thousands_of_files_stays_under_time_budget). Batching is
+    # safe: a crash before this point simply leaves the cursors unadvanced, and the re-scan is a
+    # no-op because the flush anti-joins on event_id.
+    if stats.events_written:
+        writer.flush()
+    for cursor_key, new_offset_str in pending_cursors:
+        writer.set_cursor(SOURCE, cursor_key, new_offset_str)
 
     return stats
 

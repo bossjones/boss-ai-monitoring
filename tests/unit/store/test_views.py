@@ -808,3 +808,35 @@ def test_v_infra_events_extracts_dotted_payload_keys(conn: Any, make_event: Make
         ("hook_registered", "PreToolUse", None, None, "userSettings", None),
         ("mcp_server_connection", "claudeai", "connected", "claudeai-proxy", None, None),
     ]
+
+
+def test_v_tasks_reports_zero_not_null_tokens_for_a_task_with_no_token_events(
+    conn: Any, make_event: MakeEvent
+) -> None:
+    """`sum(tokens_input)` over all-NULL rows is NULL, not 0 — and the session-detail template
+    dereferences it straight into the page, so 756 of 2763 real tasks render the literal string
+    "None". Every other view already coalesces (views.sql:46); v_tasks did not.
+    """
+    _insert_events(
+        conn,
+        [
+            make_event(
+                "no-tokens-1",
+                prompt_id="task-untokened",
+                session_id="sess-1",
+                ts=T0,
+                event_type="tool_result",
+                tokens_input=None,
+                tokens_output=None,
+                tokens_cache_read=None,
+                tokens_cache_creation=None,
+            )
+        ],
+    )
+
+    row = conn.execute(
+        "SELECT tokens_input, tokens_output, tokens_cache_read, tokens_cache_creation "
+        "FROM v_tasks WHERE prompt_id = 'task-untokened'"
+    ).fetchone()
+
+    assert row == (0, 0, 0, 0)

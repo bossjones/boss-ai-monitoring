@@ -15,7 +15,12 @@ from typing import Any
 import duckdb
 import pytest
 
-from boss_ai_monitoring.store.writer import EventWriter, connect_read_only, get_writer
+from boss_ai_monitoring.store.writer import (
+    EventWriter,
+    close_writer,
+    connect_read_only,
+    get_writer,
+)
 
 Event = dict[str, Any]
 MakeEvent = Callable[..., Event]
@@ -370,3 +375,28 @@ def test_connect_read_only_still_works_when_no_writer_is_live(
         assert _scalar(conn, "SELECT count(*) FROM events") == 1
     finally:
         conn.close()
+
+
+def test_close_writer_flushes_buffered_events_on_shutdown(
+    settings: Any, db_path: Path, make_event: MakeEvent
+) -> None:
+    """`bam serve` never closed its writer, so whatever was still buffered was silently dropped.
+
+    Combined with the ingest loops advancing their cursors after buffering, those events were lost
+    PERMANENTLY — the next boot resumed past them.
+    """
+    writer = get_writer(settings)
+    writer.write_many([make_event("shutdown-1"), make_event("shutdown-2")])  # under batch_size
+
+    assert _peek_count(db_path) == 0, "precondition: still buffered, nothing flushed yet"
+
+    close_writer(settings.store.db_path)
+
+    assert _peek_count(db_path) == 2, "shutdown must flush the buffer before closing"
+
+
+def test_close_writer_is_a_no_op_when_no_writer_is_live(db_path: Path) -> None:
+    """An idle `bam serve` holds no writer and must not create the DB file just to shut down."""
+    close_writer(db_path)
+
+    assert not db_path.exists()

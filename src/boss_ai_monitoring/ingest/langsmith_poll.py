@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -73,13 +74,20 @@ def _event_defaults() -> Event:
 def _known_session_ids(writer: EventWriter) -> set[str]:
     """Local session_ids to join LangSmith `thread_id` against.
 
-    DuckDB refuses a second `read_only` connection to a file that already has a non-read-only
-    one open (the writer's), so this reads through the writer's own connection rather than
-    opening a fresh one — no new connection, the single-writer invariant (G5) still holds.
+    DuckDB refuses a second `read_only` connection to a file that already has a non-read-only one
+    open (the writer's), so this reads through the writer rather than opening a fresh one — no new
+    connection, the single-writer invariant (G5) still holds.
+
+    It must be `writer.cursor()`, NOT the writer's own connection object (OQ-06). DuckDB parks the
+    pending result ON the connection, so sharing it meant this full-table scan could hand ITS rows
+    to a concurrent `get_cursor()` on the jsonl scanner's thread — which then tried `int()` on a
+    session UUID and killed the scan pass. A cursor has its own result set. Taking the write lock
+    instead would work but would stall every OTLP/JSONL flush for the length of this scan.
     """
-    rows = writer._conn.execute(
-        "SELECT DISTINCT session_id FROM events WHERE session_id IS NOT NULL"
-    ).fetchall()
+    with closing(writer.cursor()) as cursor:
+        rows = cursor.execute(
+            "SELECT DISTINCT session_id FROM events WHERE session_id IS NOT NULL"
+        ).fetchall()
     return {row[0] for row in rows}
 
 
@@ -197,11 +205,19 @@ async def poll_once(
             if thread_id is not None and not matched:
                 unmatched_runs += 1
             events.append(_run_to_event(run, session_id=thread_id if matched else None))
+            # No `run.start_time is not None` guard here on purpose: `start_time: datetime` is a
+            # REQUIRED, non-Optional field on the SDK's RunBase, so a run that lacks it fails
+            # pydantic validation inside `list_runs` and never reaches this loop. A guard would be
+            # dead code that misstates the SDK contract (pyrefly narrows it to unreachable).
             if latest_start is None or run.start_time > latest_start:
                 latest_start = run.start_time
 
         if events:
             writer.write_many(events)
+            # Same invariant as the jsonl scanner: never advance a cursor past unflushed data.
+            # `write_many` only flushes at `batch_size`, so a small poll would otherwise record the
+            # runs as consumed while they sit in memory — and `bam serve` never closes its writer.
+            writer.flush()
         if latest_start is not None:
             writer.set_cursor(SOURCE, key, (latest_start - _CURSOR_OVERLAP).isoformat())
 

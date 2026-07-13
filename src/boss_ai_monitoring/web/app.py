@@ -58,24 +58,39 @@ async def _poll_events(
     without any cross-module event bus.
     """
     last_ts: datetime | None = None
+    last_event_id: str | None = None
     while not await request.is_disconnected():
         if settings.store.db_path.exists():
             conn = connect_read_only(settings.store.db_path)
             try:
+                # `ts IS NOT NULL` is load-bearing, not defensive noise. `jsonl._parse_ts` returns
+                # None for a missing or malformed `timestamp` and the row is stored with a NULL ts
+                # (the column is nullable). Such a row cannot take part in a ts-watermark stream at
+                # all — it has no position on the timeline — and streaming it used to raise
+                # `AttributeError` on `.isoformat()` below, killing the feed permanently. DuckDB
+                # sorts NULLs LAST, so this only bit on a small/fresh DB, where the rows fit inside
+                # the LIMIT. The events are still counted everywhere that does not order by time.
                 query = (
                     "SELECT event_id, ts, source, event_type, session_id, tool_name, cost_usd "
-                    "FROM events"
+                    "FROM events WHERE ts IS NOT NULL"
                 )
                 params: list[object] = []
                 if last_ts is not None:
-                    query += " WHERE ts > ?"
-                    params.append(last_ts)
-                query += " ORDER BY ts ASC LIMIT 200"
+                    # (ts, event_id), not ts alone. ONE transcript line emits SEVERAL events sharing
+                    # a single ts (jsonl stamps every tool_result block from the line's one
+                    # `timestamp`), so a strict `ts > ?` cursor that lands mid-tie at the LIMIT
+                    # boundary drops the remaining siblings permanently. The composite makes the
+                    # cursor total, so every row has exactly one position.
+                    query += " AND (ts, event_id) > (?, ?)"
+                    params.extend([last_ts, last_event_id])
+                query += " ORDER BY ts ASC, event_id ASC LIMIT 200"
                 rows = conn.execute(query, params).fetchall()
             finally:
                 conn.close()
             for row in rows:
-                last_ts = row[1]
+                if row[1] is None:  # belt and braces — the watermark must never be poisoned to
+                    continue  # None, or the WHERE clause drops and the stream replays forever
+                last_ts, last_event_id = row[1], row[0]
                 payload = {
                     "event_id": row[0],
                     "ts": row[1].isoformat(),

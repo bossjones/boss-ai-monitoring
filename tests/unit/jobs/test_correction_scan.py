@@ -193,3 +193,98 @@ def test_events_without_session_id_are_ignored(event_factory, ts) -> None:
     ]
 
     assert scan_corrections(events) == []
+
+
+# --- real jsonl payload shapes -------------------------------------------------------------
+#
+# The fixtures above use `payload={"text": ...}`, which NO ingest source has ever produced. Against
+# the live DB, 0 of 4522 `user_prompt` events have a top-level "text" key — the prompt text lives at
+# `payload.message.content`, either a plain string (3787x) or a content-block array (735x). So the
+# phrase matcher never fired once in production while these tests stayed green. These pin the shapes
+# that actually exist.
+
+
+def test_correction_phrase_is_detected_in_a_real_jsonl_string_payload(event_factory, ts) -> None:
+    events = [
+        event_factory(
+            event_type="user_prompt",
+            session_id="sess-1",
+            ts=ts(0),
+            payload={"type": "user", "message": {"role": "user", "content": "add a login form"}},
+        ),
+        event_factory(
+            event_type="user_prompt",
+            session_id="sess-1",
+            ts=ts(30),
+            payload={
+                "type": "user",
+                "message": {"role": "user", "content": "no, that's wrong — undo that"},
+            },
+        ),
+    ]
+
+    scores = scan_corrections(events)
+
+    assert scores[0].prompt_count == 2
+    assert scores[0].phrase_matches == 1
+
+
+def test_correction_phrase_is_detected_in_a_real_jsonl_content_block_payload(
+    event_factory, ts
+) -> None:
+    events = [
+        event_factory(
+            event_type="user_prompt",
+            session_id="sess-1",
+            ts=ts(0),
+            payload={
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "that's not right, "},
+                        {"type": "text", "text": "please try again"},
+                    ],
+                },
+            },
+        )
+    ]
+
+    scores = scan_corrections(events)
+
+    assert scores[0].prompt_count == 1
+    assert scores[0].phrase_matches == 1
+
+
+def test_events_with_no_timestamp_are_dropped_not_crashed(event_factory, ts) -> None:
+    """`jsonl._parse_ts` returns None for a malformed `timestamp`, and `live.fetch_events` hands
+    those rows straight to this job — so `sorted(key=e["ts"])` raised
+    `TypeError: '<' not supported between instances of 'NoneType' and 'datetime.datetime'`,
+    which the scheduler swallowed into a permanent `correction_scan: error` badge.
+
+    A ts-less event cannot be ordered OR differenced, so it cannot sit on a timeline at all: drop
+    it, exactly as `drift_check` already does. The timestamped prompts still score.
+    """
+    events = [
+        event_factory(
+            event_type="user_prompt",
+            session_id="sess-1",
+            ts=ts(0),
+            payload={"message": {"content": "no, that's wrong"}},
+        ),
+        event_factory(
+            event_type="user_prompt",
+            session_id="sess-1",
+            ts=None,  # malformed transcript timestamp
+            payload={"message": {"content": "undo that"}},
+        ),
+        event_factory(
+            event_type="tool_result", session_id="sess-1", ts=None, success=False, payload={}
+        ),
+    ]
+
+    scores = scan_corrections(events)  # must not raise
+
+    assert len(scores) == 1
+    assert scores[0].prompt_count == 1, "only the timestamped prompt can be scored"
+    assert scores[0].phrase_matches == 1

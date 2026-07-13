@@ -55,7 +55,14 @@ src = ["src", "tests"]
 extend-exclude = [".claude", "logs", "specs", "notebooks"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "SLF"]
+
+# SLF001 (private-member access on another object) is load-bearing here, not style: the OQ-06
+# crash was `langsmith_poll` reaching into `EventWriter._conn` and racing the writer's own
+# execute()/fetchone() on the shared DuckDB connection. Reads go through `writer.cursor()`.
+# Tests legitimately poke at internals (`cli._run_langsmith_poller`, `_known_session_ids`).
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["SLF001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

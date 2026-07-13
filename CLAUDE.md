@@ -45,6 +45,9 @@ duckdb "$(uv run bam config db-path)" "SELECT source, count(*) FROM events GROUP
 # Snapshot instead — works while it serves, and composes because it prints only the path:
 duckdb "$(uv run bam snapshot)" "SELECT source, count(*) FROM events GROUP BY 1"
 BAM_STORE__DB_PATH="$(uv run bam snapshot)" uvx marimo edit notebooks/explore.py
+
+# `bam snapshot` POSTs to the DASHBOARD port. If `serve` runs on a non-default port, pass the SAME
+# BAM_SERVER__* env or it misses the live app, falls back in-process, and prints an EMPTY path.
 langsmith run list --project "$LANGSMITH_PROJECT"   # LangSmith read-back (auth is ambient via direnv)
 rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output is evidence
 ```
@@ -54,6 +57,23 @@ rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output 
 - **Python via `uv` only** (`uv run`, `uvx`); Python 3.13; src/ layout (`src/boss_ai_monitoring/`).
 - **Type checker is pyrefly.** Use the `/agent-harness:pyrefly-typing` skill for annotation help.
 - **TDD red-first**: the failing test exists and fails before the implementation does.
+- **A green `just check` is NOT evidence the app works.** It was green (256 tests) through a
+  crash-looping jsonl scanner, a job that had never once fired, and two OTLP 500s — the suite
+  tests components in isolation and never the concurrent whole. Definition of done for anything
+  touching ingest: run the REAL app on an EMPTY db and watch data arrive unattended
+  (`BAM_STORE__DB_PATH=/tmp/fresh.duckdb uv run bam serve`) across several scan intervals AND a
+  LangSmith poll — then confirm rows LANDED. No errors alone can just mean a silent no-op.
+- **A green `just check` locally is NOT a green CI for the time-budget tests.** This Mac is ~3x
+  faster than the GitHub runner. `test_scan_thousands_of_files_stays_under_time_budget` (3000
+  files, 20s) passed locally and took **59.7s** in CI after a change added a DuckDB transaction
+  inside the per-file loop. A perf test that merely *passes* carries no margin signal — run
+  `uv run pytest --durations=10` and read the NUMBER, demanding ~3x headroom. Before pushing
+  anything that adds a **DB round-trip / transaction / network call inside a loop over items**,
+  count the round-trips: O(n) is the shape that blows the budget.
+- **Fixtures must match the shapes real ingest produces.** `correction_scan` read
+  `payload["text"]` for months; 0 of 4522 real prompts have that key (prompt text lives at
+  `payload.message.content` — a plain string OR a content-block array). Its tests passed happily
+  against a payload shape no source has ever written. Check a new fixture against `duckdb` first.
 - **Git: commit locally on the current branch; do NOT push unless the human explicitly asks.**
   During an autonomous build run, never push — the human reviews first. No `gh repo create`; the
   `bossjones/boss-ai-monitoring` remote already exists.
@@ -69,6 +89,18 @@ rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output 
   connection) and prints just the path, so it composes.
 - **The whole `flush()` DB round-trip is lock-protected**, not just the buffer swap — releasing the
   lock before `BEGIN TRANSACTION` let concurrent producers race the shared connection (OQ-02).
+- **DuckDB parks the pending result ON the connection**, so `execute()` + `fetchone()` is NOT
+  atomic. Two threads sharing one connection means one silently gets the OTHER's rows. This is the
+  generalization of OQ-02 that OQ-02 failed to state — and it bit again (OQ-06): unlocked
+  `get_cursor()` on the jsonl worker thread fetched `langsmith_poll`'s
+  `SELECT DISTINCT session_id FROM events`, so `int(cursor)` got a session UUID and crash-looped
+  the scanner. The crash was the LUCKY case: the same race returns a valid-but-foreign byte offset
+  or `None`, silently rewinding a transcript's cursor with no error at all.
+  **Every `_conn` touch takes `self._lock`.** The connection is name-mangled (`__conn`); ruff `SLF`
+  plus a test in `tests/unit/store/test_writer_concurrency.py` ban `._conn` outside `writer.py`.
+  **Cross-module READS go through `writer.cursor()`** — an independent result set (MVCC, committed
+  rows only) that can't be poisoned and never stalls a flush. Do NOT put reads on the write lock:
+  `_known_session_ids` is a full table scan and would serialize against every ingest flush.
 - **OTLP is http/json only** on :4318 — no gRPC, no otel-collector.
 - **Frontend**: htmx vendored as a single static file; no npm, no build step.
 - **Fast dev loop**: iterate against `uv run bam serve` locally; bring `docker compose` up the

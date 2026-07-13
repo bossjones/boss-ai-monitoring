@@ -10,7 +10,7 @@ for an endpoint that polls forever, so route-level streaming is left to the Play
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -319,3 +319,102 @@ class TestLangsmithBadge:
         response = client.get("/")
 
         assert "langsmith: not configured" not in response.text
+
+
+class TestPollEventsWithNullTimestamps:
+    """A NULL `ts` is reachable: `jsonl._parse_ts` returns None for a missing/malformed
+    `timestamp`, the parser passes it through unguarded, and `events.ts` is nullable. One bad
+    transcript line used to kill the live feed permanently.
+    """
+
+    def _write(self, db_path, rows):
+        from boss_ai_monitoring.store.writer import EventWriter
+
+        with EventWriter(db_path) as writer:
+            for row in rows:
+                writer.write(row)
+
+    def _row(self, event_id, ts):
+        return {
+            "event_id": event_id,
+            "ts": ts,
+            "source": "jsonl",
+            "event_type": "user_prompt",
+            "session_id": "sess-1",
+        }
+
+    async def test_a_null_ts_row_does_not_kill_the_stream(self, settings, db_path):
+        """`row[1].isoformat()` raised AttributeError and the generator died for good."""
+        import json
+
+        self._write(
+            db_path,
+            [self._row("good", datetime(2026, 7, 11, 12, 0, tzinfo=UTC)), self._row("bad", None)],
+        )
+
+        request = _FakeRequest(disconnect_after_calls=1)
+        events = [item async for item in _poll_events(settings, request)]  # must not raise
+
+        assert [json.loads(e["data"])["event_id"] for e in events] == ["good"]
+
+    async def test_a_null_ts_row_does_not_poison_the_watermark(self, settings, db_path):
+        """The other half. `last_ts = row[1]` reset the watermark to None BEFORE the crash line,
+        so guarding only `.isoformat()` would trade the crash for an infinite re-delivery loop:
+        with `last_ts` None the `WHERE ts > ?` clause is dropped and every poll re-sends the lot.
+        """
+        import json
+
+        self._write(
+            db_path,
+            [self._row("good", datetime(2026, 7, 11, 12, 0, tzinfo=UTC)), self._row("bad", None)],
+        )
+
+        request = _FakeRequest(disconnect_after_calls=2)  # two poll cycles
+        events = [item async for item in _poll_events(settings, request)]
+
+        ids = [json.loads(e["data"])["event_id"] for e in events]
+        assert ids == ["good"], f"row re-delivered across polls: {ids}"
+
+
+class TestPollEventsCursorTies:
+    async def test_events_sharing_one_timestamp_are_not_lost_at_the_page_boundary(
+        self, settings, db_path
+    ):
+        """A strict `ts > ?` cursor silently drops tied events across a page boundary.
+
+        One transcript line emits SEVERAL events with the SAME ts (jsonl emits one `tool_result`
+        per content block, all stamped from the line's single `timestamp`). If the LIMIT 200 page
+        ends in the middle of such a tie, `last_ts` becomes T, and the next poll's `ts > T` excludes
+        the tie's remaining siblings — permanently. Ordering by (ts, event_id) and comparing on the
+        same pair makes the cursor total.
+        """
+        import json
+
+        from boss_ai_monitoring.store.writer import EventWriter
+
+        base = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+        rows = [
+            {
+                "event_id": f"e{i:04d}",
+                "ts": base + timedelta(seconds=i),
+                "source": "jsonl",
+                "event_type": "tool_result",
+                "session_id": "sess-1",
+            }
+            for i in range(199)
+        ]
+        # two events sharing ONE ts, straddling the LIMIT 200 page boundary
+        tie_ts = base + timedelta(seconds=999)
+        rows.append({**rows[0], "event_id": "tie-a", "ts": tie_ts})
+        rows.append({**rows[0], "event_id": "tie-b", "ts": tie_ts})
+
+        with EventWriter(db_path) as writer:
+            writer.write_many(rows)
+
+        request = _FakeRequest(disconnect_after_calls=3)
+        events = [item async for item in _poll_events(settings, request)]
+        ids = [json.loads(e["data"])["event_id"] for e in events]
+
+        assert len(ids) == len(set(ids)), f"an event was re-delivered: {ids}"
+        assert "tie-a" in ids and "tie-b" in ids, "an event sharing a ts was dropped by the cursor"
+        assert len(ids) == 201
