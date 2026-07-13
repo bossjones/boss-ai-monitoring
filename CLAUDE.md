@@ -63,6 +63,13 @@ rtk proxy <cmd>   # rtk FILTERS output — prefix any command whose full output 
   touching ingest: run the REAL app on an EMPTY db and watch data arrive unattended
   (`BAM_STORE__DB_PATH=/tmp/fresh.duckdb uv run bam serve`) across several scan intervals AND a
   LangSmith poll — then confirm rows LANDED. No errors alone can just mean a silent no-op.
+- **A green `just check` locally is NOT a green CI for the time-budget tests.** This Mac is ~3x
+  faster than the GitHub runner. `test_scan_thousands_of_files_stays_under_time_budget` (3000
+  files, 20s) passed locally and took **59.7s** in CI after a change added a DuckDB transaction
+  inside the per-file loop. A perf test that merely *passes* carries no margin signal — run
+  `uv run pytest --durations=10` and read the NUMBER, demanding ~3x headroom. Before pushing
+  anything that adds a **DB round-trip / transaction / network call inside a loop over items**,
+  count the round-trips: O(n) is the shape that blows the budget.
 - **Fixtures must match the shapes real ingest produces.** `correction_scan` read
   `payload["text"]` for months; 0 of 4522 real prompts have that key (prompt text lives at
   `payload.message.content` — a plain string OR a content-block array). Its tests passed happily
