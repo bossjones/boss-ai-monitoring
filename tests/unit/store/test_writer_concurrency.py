@@ -26,8 +26,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from boss_ai_monitoring.ingest.langsmith_poll import _known_session_ids
-from boss_ai_monitoring.store.writer import EventWriter
+from boss_ai_monitoring.store.writer import EventWriter, WriterClosedError
 
 Event = dict[str, Any]
 MakeEvent = Callable[..., Event]
@@ -132,3 +134,34 @@ def test_no_module_outside_the_writer_reaches_into_the_private_connection() -> N
         f"these modules reach into EventWriter's private connection: {offenders}. "
         "Use writer.cursor() for reads, or add a locked accessor on EventWriter."
     )
+
+
+def test_using_a_closed_writer_raises_instead_of_silently_dropping_the_event(
+    db_path: Path, make_event: MakeEvent
+) -> None:
+    """A post-close `write()` used to append to the buffer and return success — the event was
+    simply gone, with no error anywhere. Shutdown now closes the writer (`close_writer`), so this
+    is reachable: a worker thread can still be inside `scan_once` when the server tears down
+    (cancelling the task does NOT stop its `asyncio.to_thread` thread).
+    """
+    writer = EventWriter(db_path)
+    writer.close()
+
+    with pytest.raises(WriterClosedError):
+        writer.write(make_event("after-close"))
+
+    with pytest.raises(WriterClosedError):
+        writer.write_many([make_event("after-close-many")])
+
+    with pytest.raises(WriterClosedError):
+        writer.get_cursor("jsonl", "/some/path.jsonl")
+
+    with pytest.raises(WriterClosedError):
+        writer.cursor()
+
+
+def test_close_is_idempotent(db_path: Path) -> None:
+    """Shutdown may close a writer that a `with` block already closed. That must be a no-op."""
+    writer = EventWriter(db_path)
+    writer.close()
+    writer.close()  # must not raise

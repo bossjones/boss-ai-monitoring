@@ -205,11 +205,19 @@ async def poll_once(
             if thread_id is not None and not matched:
                 unmatched_runs += 1
             events.append(_run_to_event(run, session_id=thread_id if matched else None))
+            # No `run.start_time is not None` guard here on purpose: `start_time: datetime` is a
+            # REQUIRED, non-Optional field on the SDK's RunBase, so a run that lacks it fails
+            # pydantic validation inside `list_runs` and never reaches this loop. A guard would be
+            # dead code that misstates the SDK contract (pyrefly narrows it to unreachable).
             if latest_start is None or run.start_time > latest_start:
                 latest_start = run.start_time
 
         if events:
             writer.write_many(events)
+            # Same invariant as the jsonl scanner: never advance a cursor past unflushed data.
+            # `write_many` only flushes at `batch_size`, so a small poll would otherwise record the
+            # runs as consumed while they sit in memory — and `bam serve` never closes its writer.
+            writer.flush()
         if latest_start is not None:
             writer.set_cursor(SOURCE, key, (latest_start - _CURSOR_OVERLAP).isoformat())
 

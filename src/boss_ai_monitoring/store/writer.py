@@ -37,6 +37,15 @@ def _event_to_row(event: Event) -> tuple[Any, ...]:
     )
 
 
+class WriterClosedError(RuntimeError):
+    """Raised on any use of a closed EventWriter — never a silent no-op, never a raw duckdb error.
+
+    `write()` used to append to the buffer and return success after close, so the event simply
+    vanished. Shutdown now closes the writer, and cancelling the jsonl task does NOT stop its
+    `asyncio.to_thread` worker, so a late write is a real possibility and must be loud.
+    """
+
+
 def _count_events(conn: duckdb.DuckDBPyConnection) -> int:
     row = conn.execute("SELECT count(*) FROM events").fetchone()
     assert row is not None
@@ -60,6 +69,7 @@ class EventWriter:
         self._buffer: list[Event] = []
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
+        self._closed = False
 
         self.__conn = duckdb.connect(str(self._db_path))
         ensure_schema(self.__conn)
@@ -74,9 +84,15 @@ class EventWriter:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def _ensure_open(self) -> None:
+        """Caller MUST already hold ``self._lock``."""
+        if self._closed:
+            raise WriterClosedError(f"EventWriter for {self._db_path} is closed")
+
     def write(self, event: Event) -> None:
         """Buffer one event. Flushes when batch_size or flush_interval_ms is hit."""
         with self._lock:
+            self._ensure_open()
             self._buffer.append(event)
             elapsed_ms = (time.monotonic() - self._last_flush) * 1000
             should_flush = (
@@ -89,6 +105,7 @@ class EventWriter:
         """Buffer many; returns the count buffered."""
         buffered = list(events)
         with self._lock:
+            self._ensure_open()
             self._buffer.extend(buffered)
             should_flush = len(self._buffer) >= self._batch_size
         if should_flush:
@@ -105,6 +122,7 @@ class EventWriter:
         `BEGIN TRANSACTION` on the one connection.
         """
         with self._lock:
+            self._ensure_open()
             batch = self._buffer
             self._buffer = []
             self._last_flush = time.monotonic()
@@ -182,15 +200,38 @@ class EventWriter:
         return dest
 
     def close(self) -> None:
-        self.flush()
-        self.__conn.close()
-        # Evict self from the get_writer() registry so a stale, closed connection can't be
-        # handed out by connect_read_only()'s writer-aware cursor() path (OQ-04) — a later
-        # get_writer()/connect_read_only() call for this path opens a fresh one instead.
+        """Flush, then close. Idempotent — a second call is a no-op, not a crash.
+
+        ORDER MATTERS, and it used to be wrong. Evict from the registry FIRST: `connect_read_only()`
+        looks the writer up under `_writers_lock` and then calls `cursor()` on it, so closing the
+        connection before evicting left a window where a reader could get a cursor on an
+        already-closed connection — the exact thing `connect_read_only()`'s comment claimed was
+        impossible. Once evicted, no new caller can reach us.
+
+        Then close the connection UNDER `self._lock`, so it cannot be pulled out from under a
+        worker thread that is mid-`get_cursor()`/`flush()` (they hold that same lock). Cancelling
+        the jsonl task does NOT stop its `asyncio.to_thread` worker — that thread can still be
+        inside `scan_once` when shutdown runs.
+        """
         with _writers_lock:
             stale_keys = [key for key, writer in _writers.items() if writer is self]
             for key in stale_keys:
                 del _writers[key]
+
+        with self._lock:
+            if self._closed:
+                return  # idempotent: a `with` block may already have closed us before shutdown does
+            # Flush INLINE rather than calling self.flush(): the lock is non-reentrant, and flush()
+            # would also now raise WriterClosedError on the second pass. The tail must reach disk —
+            # the ingest loops advance their cursors after buffering, so dropping it loses events
+            # permanently.
+            if self._buffer:
+                batch = self._buffer
+                self._buffer = []
+                self._last_flush = time.monotonic()
+                self._flush_batch(batch)
+            self._closed = True
+            self.__conn.close()
 
     def cursor(self) -> duckdb.DuckDBPyConnection:
         """An INDEPENDENT read handle on this writer's connection. For READS only.
@@ -206,7 +247,13 @@ class EventWriter:
         by, nor blocks, an in-flight flush — so a full-table scan through it cannot stall the
         ingest pipeline the way putting it on the write lock would. Caller owns closing it.
         """
-        cursor = self.__conn.cursor()
+        # Takes the lock ONLY around the liveness check and the handle creation — never around the
+        # caller's subsequent scan. That keeps the OQ-06 property intact (a full-table read through
+        # a cursor cannot stall a flush) while making it impossible to hand out a cursor on a
+        # connection that close() is about to destroy.
+        with self._lock:
+            self._ensure_open()
+            cursor = self.__conn.cursor()
         pin_utc(cursor)  # a cursor has its own session settings, not inherited from the parent
         return cursor
 
@@ -219,6 +266,7 @@ class EventWriter:
     # session UUID, or None), which crashed the scan pass or silently rewound a file's offset.
     def get_cursor(self, source: str, key: str) -> str | None:
         with self._lock:
+            self._ensure_open()
             result = self.__conn.execute(
                 "SELECT cursor FROM ingest_cursors WHERE source = ? AND key = ?", [source, key]
             ).fetchone()
@@ -226,6 +274,7 @@ class EventWriter:
 
     def set_cursor(self, source: str, key: str, cursor: str) -> None:
         with self._lock:
+            self._ensure_open()
             self.__conn.execute(
                 """
                 INSERT INTO ingest_cursors (source, key, cursor, updated_at)
@@ -273,6 +322,24 @@ def get_writer(settings: BamSettings) -> EventWriter:
             )
             _writers[key] = writer
         return writer
+
+
+def close_writer(db_path: Path) -> None:
+    """Flush and close the live writer for ``db_path``, if there is one. Safe to call always.
+
+    `bam serve` used to just exit: the writer was never closed, so anything still in the buffer was
+    silently dropped — and because the ingest loops advance their cursors after buffering, those
+    events were lost PERMANENTLY (the next boot resumed past them).
+
+    Deliberately registry-aware rather than calling `get_writer()`: an idle `bam serve` has never
+    created a writer (it is lazy), and `get_writer()` would CREATE one — and the DB file with it —
+    just to shut down.
+    """
+    key = str(Path(db_path))
+    with _writers_lock:
+        writer = _writers.get(key)
+    if writer is not None:
+        writer.close()  # close() evicts itself from the registry
 
 
 def connect_read_only(db_path: Path) -> duckdb.DuckDBPyConnection:

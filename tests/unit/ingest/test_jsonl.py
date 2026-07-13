@@ -464,3 +464,29 @@ async def test_scan_does_not_block_the_event_loop(tmp_path: Path, monkeypatch) -
     assert ticks_seen_during_scan > 0, (
         "the event loop was frozen for the whole scan — no other coroutine could run"
     )
+
+
+def test_scan_does_not_advance_the_cursor_past_events_it_never_flushed(
+    projects_dir: Path, db_path: Path, copy_fixture: Callable[..., Path]
+) -> None:
+    """Cursor durability must FOLLOW data durability, or a restart loses events permanently.
+
+    `write_many()` only flushes at `batch_size` (500) — it ignores `flush_interval_ms`, there is no
+    periodic flusher, and `bam serve` never closes its writer. So a scan pass that produces fewer
+    than 500 events buffers them in memory and then records the cursor as having CONSUMED them.
+    Ctrl-C and they are gone: the next boot resumes from the advanced offset and never re-reads
+    them.
+    """
+    path = copy_fixture("completed_session.jsonl", projects_dir / "proj-a")
+
+    # deliberately NOT a `with` block — `bam serve` never closes the writer, and that is the point
+    writer = EventWriter(db_path, batch_size=1000, flush_interval_ms=60_000)
+    stats = scan_once(projects_dir, writer)
+    cursor = writer.get_cursor("jsonl", str(path))
+
+    assert stats.events_written > 0, "fixture must produce events for this test to mean anything"
+    assert _peek_count(db_path) == stats.events_written, (
+        "events were buffered but never flushed, yet the cursor advanced past them — "
+        "a restart would lose them forever"
+    )
+    assert cursor == str(path.stat().st_size)

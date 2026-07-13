@@ -29,7 +29,7 @@ from boss_ai_monitoring.ingest import jsonl as jsonl_ingest
 from boss_ai_monitoring.ingest import langsmith_poll as langsmith_ingest
 from boss_ai_monitoring.jobs.live import build_live_callables, persist_job_status
 from boss_ai_monitoring.jobs.scheduler import JobScheduler
-from boss_ai_monitoring.store.writer import get_writer, snapshot
+from boss_ai_monitoring.store.writer import close_writer, get_writer, snapshot
 
 log = logging.getLogger("bam")
 
@@ -165,6 +165,11 @@ async def _serve_both(app: FastAPI, settings: BamSettings) -> None:
         for task in background:
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
+        # Flush and close the writer LAST, after the ingest loops are down. Without this the
+        # process just exited and whatever was still buffered was silently dropped — and since the
+        # loops advance their cursors after buffering, those events were lost for good.
+        # A no-op when the writer was never created (an idle serve is lazy, it holds none).
+        await asyncio.to_thread(close_writer, settings.store.db_path)
 
 
 def _cmd_serve(_args: argparse.Namespace) -> int:

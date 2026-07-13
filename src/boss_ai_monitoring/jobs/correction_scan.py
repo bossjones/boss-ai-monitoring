@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from boss_ai_monitoring.jobs._events import Event
+from boss_ai_monitoring.jobs._events import Event, ordered_by_ts
 
 DEFAULT_REPROMPT_WINDOW_S = 60.0
 
@@ -100,7 +100,8 @@ def scan_corrections(
 
     scores: list[SessionCorrectionScore] = []
     for session_id, session_events in by_session.items():
-        ordered = sorted(session_events, key=lambda e: e["ts"])
+        # drops ts-less rows: they can be neither ordered nor differenced (see ordered_by_ts)
+        ordered = ordered_by_ts(session_events)
 
         prompt_count = 0
         correction_count = 0

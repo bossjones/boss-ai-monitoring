@@ -310,6 +310,13 @@ def scan_once(projects_dir: Path, writer: EventWriter) -> ScanStats:
         if events:
             writer.write_many(events)
             stats.events_written += len(events)
+            # Cursor durability must FOLLOW data durability. `write_many` only flushes once the
+            # buffer hits `batch_size` (500), so a smaller pass leaves the events in memory — and
+            # advancing the cursor first would record them as consumed. `bam serve` never closes
+            # its writer, so a Ctrl-C would drop them and the next boot would resume PAST them.
+            # The flush anti-joins on event_id, so this is idempotent and costs one round-trip
+            # per file that actually produced events.
+            writer.flush()
         writer.set_cursor(SOURCE, cursor_key, str(new_offset))
 
     return stats
